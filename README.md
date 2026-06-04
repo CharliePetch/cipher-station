@@ -1,8 +1,10 @@
 # Orbit
 
-**Self-hosted, end-to-end encrypted content sharing over IPFS.**
+**Self-hosted, post-quantum, end-to-end encrypted content sharing over IPFS.**
 
 Orbit lets you run a personal **station** on a Raspberry Pi (or any Linux box) that publishes encrypted content to IPFS and grants access to followers via cryptographic envelopes. No centralized servers, no platform lock-in — you own your data and your identity.
+
+Content access control and device authentication use **NIST post-quantum algorithms** — ML-KEM-768 (FIPS 203) and ML-DSA-65 (FIPS 204) — so traffic captured today cannot be decrypted by a future quantum computer ("harvest now, decrypt later"). You can also publish **public, unencrypted** content for anyone to read.
 
 ## How It Works
 
@@ -24,12 +26,14 @@ You (Station)                         Followers
      |     9. Decrypt content              |
 ```
 
-Each post gets its own random symmetric key. That key is wrapped in a **SealedBox envelope** for each authorized follower, sealed to their public key. Only they can open it. Your station's IPFS **Peer ID** acts as a permanent address — followers can always find you via IPNS, even if your IP or tunnel URL changes.
+Each post gets its own random symmetric key. That key is wrapped in a **post-quantum envelope** (ML-KEM-768) for each authorized follower, encapsulated to their public key. Only they can open it. Your station's IPFS **Peer ID** acts as a permanent address — followers can always find you via IPNS, even if your IP or tunnel URL changes.
 
 ## Features
 
+- **Post-quantum cryptography** — Content envelopes use ML-KEM-768 (FIPS 203) and device authentication uses ML-DSA-65 (FIPS 204). No classical X25519 anywhere — safe against "harvest now, decrypt later".
 - **End-to-end encryption** — Content is encrypted before it leaves your device. IPFS peers only see ciphertext.
-- **Per-post access control** — Each post has its own key. Grant access to everyone, specific followers, or just yourself.
+- **Per-post access control** — Each post has its own key. Grant access to everyone, specific followers, just yourself, or **publicly** (unencrypted).
+- **Optional public hosting** — Publish a file unencrypted to IPFS for anyone to fetch via a public gateway — useful for a profile picture, a public document, or a static site asset.
 - **Permanent discovery via IPNS** — Your IPFS Peer ID is your stable address. No DNS, no static IP required.
 - **Zero-config public access** — Optional Cloudflare Quick Tunnel gives you a public HTTPS URL with no port forwarding.
 - **Multi-client architecture** — One identity, many apps. Photo sharing (orbitstagram), file storage (orbitdrive), and more — all sharing the same encryption and social graph.
@@ -110,7 +114,7 @@ See [PROTOCOL.md](PROTOCOL.md) Appendix B for the full configuration reference.
  +-------------------------------------------+
  |  Discovery Layer (IPNS)                    |  Permanent station addresses
  +-------------------------------------------+
- |  Cryptographic Primitives                  |  NaCl, BLAKE2b, HMAC-SHA256
+ |  Cryptographic Primitives                  |  ML-KEM-768, ML-DSA-65, NaCl, BLAKE2b
  +-------------------------------------------+
  |  Transport (IPFS + HTTPS API)              |  Content storage, station API
  +-------------------------------------------+
@@ -120,29 +124,53 @@ See [PROTOCOL.md](PROTOCOL.md) Appendix B for the full configuration reference.
 
 | Purpose | Algorithm |
 |---------|-----------|
-| Post encryption | XSalsa20-Poly1305 (NaCl SecretBox) |
-| Envelope sealing | Curve25519 SealedBox |
-| Key agreement | X25519 |
-| Auth key derivation | BLAKE2b (domain-separated) |
-| Request signing | HMAC-SHA256 |
+| Post encryption | XSalsa20-Poly1305 (NaCl SecretBox) — 256-bit, already PQ-resistant |
+| Envelope key wrapping | **ML-KEM-768** (FIPS 203) KEM-DEM + SecretBox |
+| Envelope KDF | BLAKE2b (domain-separated, `person="orbit-kem"`) |
+| Device request signing | **ML-DSA-65** (FIPS 204) signatures |
 | PIN hashing | scrypt |
 | Key-at-rest encryption | Argon2i |
+
+ML-KEM is a Key Encapsulation Mechanism, so a post's symmetric key is wrapped using the standard **KEM-DEM** construction: encapsulate to the recipient's ML-KEM key, derive a wrapping key from the shared secret with BLAKE2b, and SecretBox-wrap the post key. Device authentication signs the canonical request string with ML-DSA instead of deriving an HMAC key from an (X25519) ECDH.
+
+> **Caveats.** The post-quantum primitives use the pure-Python [`kyber-py`](https://pypi.org/project/kyber-py/) and [`dilithium-py`](https://pypi.org/project/dilithium-py/) libraries — chosen because they install with no native build on a Raspberry Pi. They are **not constant-time** and are self-described as educational; in Orbit's model decapsulation and signing happen client-side (never as a server oracle), so timing side-channels are low-risk, but this is not a hardened production crypto stack. This release is also a **hard breaking change** — there is no migration from older X25519 stations, and every client must implement ML-KEM envelope opening and ML-DSA request signing.
 
 ## API
 
 | Endpoint | Auth | Description |
 |----------|------|-------------|
-| `GET /profile` | None | Public identity document (uid, public key, peer ID, manifest pointer) |
+| `GET /profile` | None | Public identity document (uid, ML-KEM + ML-DSA public keys, peer ID, manifest pointer) |
 | `GET /health` | None | Station health check |
 | `POST /inbox` | None* | Receive follow requests |
-| `POST /post` | HMAC | Create an encrypted post |
-| `POST /rewrap` | HMAC | Get a device-specific envelope |
-| `POST /follow` | HMAC | Follow another user |
-| `POST /unfollow` | HMAC | Unfollow a user |
+| `POST /post` | Signature | Create a post (`audience_mode`: `self` / `specific` / `all` / `public`) |
+| `POST /rewrap` | Signature | Get a device-specific envelope |
+| `POST /follow` | Signature | Follow another user |
+| `POST /unfollow` | Signature | Unfollow a user |
 | `POST /delegate/start` | None | Initiate device pairing |
 | `POST /delegate/confirm` | None | Confirm pairing with PIN |
 
-\* Follow requests are unauthenticated; other inbox message types require HMAC.
+\* Follow requests are unauthenticated; other inbox message types require a signature.
+
+**Authenticated requests** are signed with the device's **ML-DSA-65** key. The client sends `x-orbit-uid`, `x-orbit-device`, `x-orbit-ts`, `x-orbit-nonce`, `x-orbit-body-sha256`, and `x-orbit-sig` (base64 ML-DSA signature over the canonical string `METHOD\nPATH\nUID\nDEVICE_UID\nTS\nNONCE\nBODY_SHA256`). The station verifies the signature against the device's stored public key; a ±60 s timestamp window and a one-time nonce store prevent replay.
+
+### Audience modes
+
+Every post declares an `audience_mode`:
+
+| Mode | Who can read | Encrypted? |
+|------|--------------|------------|
+| `self` | only you | yes |
+| `specific` | you + listed follower UIDs | yes |
+| `all` | you + all allowed followers | yes |
+| `public` | **anyone** | **no** |
+
+A `public` post is uploaded to IPFS **unencrypted** with no envelopes; its manifest entry is flagged `"encrypted": false` and any metadata is stored in the clear. Read it directly from any IPFS gateway:
+
+```
+https://ipfs.io/ipfs/<post_cid>
+```
+
+⚠️ Public content is **permanent and world-readable** once published — anyone who learns the CID (including via your public IPNS manifest) can fetch it, and IPFS has no delete. Only publish what you intend to share with the world.
 
 ## IPNS Discovery
 
@@ -167,7 +195,10 @@ Orbit is a protocol, not a single app. Multiple clients share the same identity,
 {
   "clients": {
     "orbitstagram": {
-      "posts": [{ "post_cid": "Qm...", "audience_mode": "all", "envelopes_cid": "Qm..." }]
+      "posts": [
+        { "post_cid": "Qm...", "audience_mode": "all", "envelopes_cid": "Qm..." },
+        { "post_cid": "Qm...", "audience_mode": "public", "encrypted": false, "envelopes_cid": null }
+      ]
     },
     "orbitdrive": {
       "posts": [{ "post_cid": "Qm...", "audience_mode": "self", "envelopes_cid": "Qm..." }]
@@ -189,12 +220,13 @@ orbit/
 ├── PROTOCOL.md             # Full protocol specification
 ├── orbit_node/
 │   ├── main.py             # FastAPI app and routes
-│   ├── identity.py         # Keypair generation and loading
+│   ├── pqcrypto.py         # Post-quantum primitives (ML-KEM-768, ML-DSA-65)
+│   ├── identity.py         # PQC keypair generation and loading
 │   ├── posts.py            # Post creation and encryption
-│   ├── envelopes.py        # Envelope creation/decryption
+│   ├── envelopes.py        # ML-KEM envelope create/open
 │   ├── manifest.py         # Manifest serialization
 │   ├── rewrap.py           # Delegate envelope rewrap
-│   ├── auth.py             # HMAC authentication
+│   ├── auth.py             # ML-DSA signature authentication
 │   ├── inbox.py            # Follow request handling
 │   ├── pairing.py          # Device pairing (PIN)
 │   ├── graph.py            # Social graph encryption
@@ -206,8 +238,9 @@ orbit/
 │   ├── config.py           # Configuration loading
 │   └── database.py         # SQLite schema
 ├── orbit_data/             # Runtime data (created on first run)
-│   ├── keys/private.bin    # Station keypair
-│   ├── public.json         # Public identity
+│   ├── keys/mlkem.bin      # Station ML-KEM-768 keypair (content)
+│   ├── keys/mldsa.bin      # Station ML-DSA-65 keypair (auth)
+│   ├── public.json         # Public identity (uid, mlkem/mldsa public keys)
 │   ├── orbit.db            # SQLite database
 │   └── ssl/                # TLS certificates
 └── tests/                  # Test suite

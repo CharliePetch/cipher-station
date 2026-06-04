@@ -137,6 +137,8 @@ fi
 source "$ORBIT_DIR/.venv/bin/activate"
 
 pip install --quiet --upgrade pip
+# Includes the post-quantum libs kyber-py (ML-KEM-768) and dilithium-py (ML-DSA-65).
+# Both are pure-Python and ship on piwheels, so no compiler/native build is needed on a Pi.
 pip install --quiet -r "$ORBIT_DIR/requirements.txt"
 ok "Python dependencies installed"
 
