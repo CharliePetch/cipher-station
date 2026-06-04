@@ -44,7 +44,6 @@ def get_public_profile():
     info = load_public_identity()
 
     uid = info.get("uid")
-    public_key = info.get("public_key")
     manifest_pointer = info.get("manifest_pointer")
 
     manifest = load_manifest() or {}
@@ -53,7 +52,8 @@ def get_public_profile():
 
     return {
         "uid": uid,
-        "public_key": public_key,
+        "mlkem_public_key": info.get("mlkem_public_key"),  # ML-KEM-768 (content)
+        "mldsa_public_key": info.get("mldsa_public_key"),  # ML-DSA-65 (auth)
         "endpoint": info.get("endpoint"),
         "ipfs_peer_id": info.get("ipfs_peer_id"),
         "manifest_cid": manifest_pointer,

@@ -7,13 +7,14 @@ from typing import Optional, Literal
 from orbit_node.config import MANIFEST_DIR, PUBLIC_JSON_PATH
 
 logger = logging.getLogger(__name__)
+from orbit_node import pqcrypto
 from orbit_node.storage import write_json
 from orbit_node.envelopes import encrypt_key_for_follower
 from orbit_node.ipfs_client import ipfs_add_bytes, ipfs_unpin, ipfs_repo_gc, publish_public_json_to_ipns
 
 MANIFEST_PATH = MANIFEST_DIR / "manifest.json"
 
-AudienceMode = Literal["self", "specific", "all"]
+AudienceMode = Literal["self", "specific", "all", "public"]
 
 
 # -----------------------------
@@ -180,16 +181,16 @@ def add_post_to_manifest(
 
     for follower in followers:
         uid = follower.get("uid")
-        public_key_hex = follower.get("public_key")
+        mlkem_pub_hex = follower.get("mlkem_public_key")
 
         if not uid or not isinstance(uid, str):
             continue
 
-        if not isinstance(public_key_hex, str) or len(public_key_hex) != 64:
-            logger.warning(f"Skipping follower {uid}: invalid pubkey")
+        if not isinstance(mlkem_pub_hex, str) or len(mlkem_pub_hex) != pqcrypto.MLKEM_PUBLIC_HEX:
+            logger.warning(f"Skipping follower {uid}: invalid ML-KEM pubkey")
             continue
 
-        encrypted_hex = encrypt_key_for_follower(sym_key, public_key_hex)
+        encrypted_hex = encrypt_key_for_follower(sym_key, mlkem_pub_hex)
         if encrypted_hex is None:
             logger.warning(f"Failed envelope for follower {uid}")
             continue
@@ -219,9 +220,45 @@ def add_post_to_manifest(
             raise ValueError("metadata_enc must be a hex string or None")
         entry["metadata"] = metadata_enc  # encrypted metadata
 
-    # -------------------------------------
-    # 4) Append + Save locally (new shape)
-    # -------------------------------------
+    return _append_entry_and_publish(entry, client_key)
+
+
+def add_public_post_to_manifest(
+    post_cid: str,
+    metadata: dict | None = None,
+    *,
+    client: Optional[str] = None,
+) -> dict:
+    """
+    Append a PUBLIC (unencrypted) post to the manifest.
+
+    Public posts carry no envelopes and no symmetric key — the content at
+    `post_cid` is plaintext on IPFS and readable by anyone. Metadata, if any,
+    is stored in the clear. The `encrypted: false` flag distinguishes these
+    entries from the encrypted ones (whose `metadata` is a hex blob).
+    """
+    client_key = (client or "default").strip() or "default"
+
+    entry: dict = {
+        "post_cid": post_cid,
+        "audience_mode": "public",
+        "encrypted": False,
+        "envelopes_cid": None,
+        "envelopes_count": 0,
+    }
+    if metadata is not None:
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be a dict or None")
+        entry["metadata"] = metadata  # plaintext (NOT a hex blob)
+
+    return _append_entry_and_publish(entry, client_key)
+
+
+def _append_entry_and_publish(entry: dict, client_key: str) -> dict:
+    """
+    Append a post entry to the client's bucket, save locally, publish the
+    manifest to IPFS, and update the public.json pointer (+ IPNS).
+    """
     manifest = load_manifest(client=client_key)
     manifest = _normalize_manifest_shape(manifest, default_client=client_key)
 
@@ -236,9 +273,6 @@ def add_post_to_manifest(
     manifest["clients"][client_key]["posts"].append(entry)
     save_manifest(manifest, client=client_key)
 
-    # -------------------------------------
-    # 5) Publish manifest to IPFS + update public.json pointer
-    # -------------------------------------
     manifest_cid = _publish_manifest_to_ipfs(manifest)
     _update_public_json_manifest_pointer(manifest_cid)
 

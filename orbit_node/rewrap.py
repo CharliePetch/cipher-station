@@ -3,9 +3,9 @@
 import json
 from typing import Optional, Tuple, Dict
 
-from nacl.public import PrivateKey
 from nacl.secret import SecretBox
 
+from orbit_node import pqcrypto
 from orbit_node.manifest import load_manifest
 from orbit_node.ipfs_client import ipfs_get_bytes
 from orbit_node.envelopes import open_envelope, encrypt_key_for_follower
@@ -55,24 +55,22 @@ def _find_post_entry(manifest: dict, post_cid: str) -> Tuple[str, dict]:
 
 def _get_device_public_key_hex(uid: str, device_uid: str) -> str:
     """
-    Looks up the delegate device public key from your local DB.
-    Assumes list_follower_devices(uid) returns rows including:
-      {"device_uid": "...", "public_key": "..."}
+    Looks up the delegate device's ML-KEM (content) public key from the local DB.
     """
     rows = list_follower_devices(uid) or []
     for r in rows:
         if not isinstance(r, dict):
             continue
         if r.get("device_uid") == device_uid:
-            pk = r.get("public_key")
-            if isinstance(pk, str) and len(pk) == 64:
+            pk = r.get("mlkem_public_key")
+            if isinstance(pk, str) and len(pk) == pqcrypto.MLKEM_PUBLIC_HEX:
                 return pk
-            raise ValueError(f"Device {device_uid} found but has invalid public_key")
+            raise ValueError(f"Device {device_uid} found but has invalid mlkem_public_key")
 
     raise KeyError(f"Unknown device_uid {device_uid} for uid {uid}")
 
 
-def handle_rewrap_request(station_sk: PrivateKey, msg: dict) -> dict:
+def handle_rewrap_request(station_mlkem_sk: bytes, msg: dict) -> dict:
     """
     NEW manifest schema only.
 
@@ -117,7 +115,7 @@ def handle_rewrap_request(station_sk: PrivateKey, msg: dict) -> dict:
 
     # 2) Open root envelope -> sym key
     try:
-        sym_key = open_envelope(station_sk, root_env_hex)
+        sym_key = open_envelope(station_mlkem_sk, root_env_hex)
     except Exception as e:
         return {"error": f"open_envelope failed: {e!r}"}
 

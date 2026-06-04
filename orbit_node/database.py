@@ -29,17 +29,20 @@ def get_db():
 
         # -----------------------------------------------------
         #  FOLLOWERS TABLE (inbound)
+        #  Post-quantum: each principal carries an ML-KEM public key
+        #  (content envelopes) and an ML-DSA public key (auth signatures).
         # -----------------------------------------------------
         _conn.execute("""
             CREATE TABLE IF NOT EXISTS followers (
                 uid TEXT NOT NULL,
-                public_key TEXT NOT NULL,
                 device_uid TEXT NOT NULL,
+                mlkem_public_key TEXT NOT NULL,
+                mldsa_public_key TEXT NULL,
                 alias TEXT NULL,
                 allowed TEXT NOT NULL DEFAULT 'Allowed',
                 endpoint TEXT NULL,
                 ipns_id TEXT NULL,
-                PRIMARY KEY(uid, public_key)
+                PRIMARY KEY(uid, device_uid)
             );
         """)
 
@@ -49,11 +52,12 @@ def get_db():
         _conn.execute("""
             CREATE TABLE IF NOT EXISTS following (
                 uid TEXT NOT NULL,
-                public_key TEXT NOT NULL,
+                mlkem_public_key TEXT NOT NULL,
+                mldsa_public_key TEXT NULL,
                 endpoint TEXT NOT NULL,
                 alias TEXT NULL,
                 ipns_id TEXT NULL,
-                PRIMARY KEY(uid, public_key)
+                PRIMARY KEY(uid)
             );
         """)
 

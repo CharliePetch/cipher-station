@@ -87,7 +87,7 @@ def rebuild_graphs_and_envelopes():
 
     for f in allowed_followers:
         follower_uid = f["uid"]
-        follower_pubkey = f["public_key"]
+        follower_pubkey = f["mlkem_public_key"]
         device_uid = f["device_uid"]
 
         envelopes.setdefault(follower_uid, [])

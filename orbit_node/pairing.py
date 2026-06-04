@@ -5,6 +5,7 @@ import secrets
 import time
 from dataclasses import dataclass
 
+from orbit_node import pqcrypto
 from orbit_node.database import get_db
 
 PIN_LEN = 6
@@ -19,7 +20,8 @@ def _init_schema():
         created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL,
         device_uid TEXT NOT NULL,
-        device_public_key TEXT NOT NULL,
+        device_mlkem_public_key TEXT NOT NULL,
+        device_mldsa_public_key TEXT NOT NULL,
         salt_hex TEXT NOT NULL,
         pin_hash_hex TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0,
@@ -45,15 +47,22 @@ class PairingSession:
     pin: str
     expires_at: int
 
-def create_pairing_session(device_uid: str, device_public_key: str) -> PairingSession:
+def create_pairing_session(device_uid: str, device_mlkem_public_key: str,
+                           device_mldsa_public_key: str) -> PairingSession:
     _init_schema()
 
     if not device_uid:
         raise ValueError("device_uid required")
 
-    # X25519 public key is 32 bytes => 64 hex chars in your ecosystem
-    if not device_public_key or len(device_public_key) != 64 or not _is_hex(device_public_key):
-        raise ValueError("device_public_key must be 64 hex chars")
+    if (not device_mlkem_public_key
+            or len(device_mlkem_public_key) != pqcrypto.MLKEM_PUBLIC_HEX
+            or not _is_hex(device_mlkem_public_key)):
+        raise ValueError(f"device_mlkem_public_key must be {pqcrypto.MLKEM_PUBLIC_HEX} hex chars")
+
+    if (not device_mldsa_public_key
+            or len(device_mldsa_public_key) != pqcrypto.MLDSA_PUBLIC_HEX
+            or not _is_hex(device_mldsa_public_key)):
+        raise ValueError(f"device_mldsa_public_key must be {pqcrypto.MLDSA_PUBLIC_HEX} hex chars")
 
     now = int(time.time())
     pairing_id = secrets.token_urlsafe(18)
@@ -67,25 +76,29 @@ def create_pairing_session(device_uid: str, device_public_key: str) -> PairingSe
     conn.execute(
         """
         INSERT INTO pairing_sessions
-        (pairing_id, created_at, expires_at, device_uid, device_public_key, salt_hex, pin_hash_hex, attempts, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'pending')
+        (pairing_id, created_at, expires_at, device_uid, device_mlkem_public_key,
+         device_mldsa_public_key, salt_hex, pin_hash_hex, attempts, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending')
         """,
-        (pairing_id, now, expires_at, device_uid, device_public_key, salt.hex(), pin_hash.hex())
+        (pairing_id, now, expires_at, device_uid, device_mlkem_public_key,
+         device_mldsa_public_key, salt.hex(), pin_hash.hex())
     )
     conn.commit()
 
     return PairingSession(pairing_id=pairing_id, pin=pin, expires_at=expires_at)
 
-def confirm_pairing_session(pairing_id: str, pin: str) -> tuple[str, str]:
+def confirm_pairing_session(pairing_id: str, pin: str) -> tuple[str, str, str]:
     """
-    Returns (device_uid, device_public_key) if PIN matches and session is valid.
+    Returns (device_uid, device_mlkem_public_key, device_mldsa_public_key)
+    if PIN matches and session is valid.
     """
     _init_schema()
     conn = get_db()
 
     row = conn.execute(
         """
-        SELECT device_uid, device_public_key, expires_at, salt_hex, pin_hash_hex, attempts, status
+        SELECT device_uid, device_mlkem_public_key, device_mldsa_public_key,
+               expires_at, salt_hex, pin_hash_hex, attempts, status
         FROM pairing_sessions
         WHERE pairing_id=?
         """,
@@ -95,7 +108,8 @@ def confirm_pairing_session(pairing_id: str, pin: str) -> tuple[str, str]:
     if not row:
         raise ValueError("pairing_id not found")
 
-    device_uid, device_public_key, expires_at, salt_hex, pin_hash_hex, attempts, status = row
+    (device_uid, device_mlkem_public_key, device_mldsa_public_key,
+     expires_at, salt_hex, pin_hash_hex, attempts, status) = row
     now = int(time.time())
 
     if status != "pending":
@@ -129,4 +143,4 @@ def confirm_pairing_session(pairing_id: str, pin: str) -> tuple[str, str]:
     )
     conn.commit()
 
-    return device_uid, device_public_key
+    return device_uid, device_mlkem_public_key, device_mldsa_public_key

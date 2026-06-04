@@ -1,13 +1,11 @@
 # orbit_node/auth.py
+import base64
 import hmac
-import hashlib
 import logging
 import time
-from functools import lru_cache
 from fastapi import Header, HTTPException, Request
-from nacl import bindings
 
-from orbit_node.identity import get_identity
+from orbit_node import pqcrypto
 from orbit_node.followers import list_follower_devices
 from orbit_node.database import get_db
 
@@ -17,19 +15,11 @@ MAX_SKEW_SECONDS = 60
 NONCE_TTL_SECONDS = 60 * 60 * 24  # keep for 24h
 
 
-def _derive_auth_key(station_sk_bytes: bytes, device_pk_bytes: bytes) -> bytes:
-    """
-    X25519 -> shared secret -> domain-separated auth key.
-    Must match your client (blake2b person=b"orbit-auth").
-    """
-    shared = bindings.crypto_scalarmult(station_sk_bytes, device_pk_bytes)
-    return hashlib.blake2b(shared, digest_size=32, person=b"orbit-auth").digest()
-
-
 def _canonical(method: str, path: str, uid: str, device_uid: str, ts: str, nonce: str, body_sha256: str) -> bytes:
     """
-    Must match iOS/client exactly:
+    Must match the client exactly:
       METHOD\nPATH\nUID\nDEVICE_UID\nTS\nNONCE\nBODY_SHA256
+    The device signs this string with its ML-DSA-65 secret key.
     """
     s = "\n".join([method.upper(), path, uid, device_uid, ts, nonce, body_sha256])
     return s.encode("utf-8")
@@ -63,15 +53,6 @@ def _cleanup_nonces(now_ts: int):
     db.commit()
 
 
-@lru_cache(maxsize=1)
-def _station_sk_bytes() -> bytes:
-    station_sk, _station_pk_hex, _pub_json = get_identity()
-    sk_bytes = station_sk.encode()
-    if len(sk_bytes) != 32:
-        raise RuntimeError(f"Station private key must be 32 bytes, got {len(sk_bytes)}")
-    return sk_bytes
-
-
 async def require_delegate(
     request: Request,
     x_orbit_uid: str = Header(..., alias="x-orbit-uid"),
@@ -79,7 +60,7 @@ async def require_delegate(
     x_orbit_ts: str = Header(..., alias="x-orbit-ts"),
     x_orbit_nonce: str = Header(..., alias="x-orbit-nonce"),
     x_orbit_body_sha256: str = Header(..., alias="x-orbit-body-sha256"),
-    x_orbit_hmac: str = Header(..., alias="x-orbit-hmac"),
+    x_orbit_sig: str = Header(..., alias="x-orbit-sig"),
 ):
     # 1) time window
     try:
@@ -98,7 +79,7 @@ async def require_delegate(
         except Exception:
             pass
 
-    # 2) device must be authorized (+ Allowed)
+    # 2) device must be authorized (+ Allowed) and have an ML-DSA auth key
     devices = list_follower_devices(x_orbit_uid)
     dev = next(
         (d for d in devices if d.get("device_uid") == x_orbit_device and d.get("allowed") == "Allowed"),
@@ -107,28 +88,34 @@ async def require_delegate(
     if not dev:
         raise HTTPException(403, "device not authorized")
 
-    # 3) replay protection (store AFTER auth succeeds)
+    mldsa_pub_hex = dev.get("mldsa_public_key")
+    if not mldsa_pub_hex:
+        raise HTTPException(403, "device has no auth (ML-DSA) public key")
+
+    # 3) replay protection (check before recording; store only after auth succeeds)
     if _nonce_seen(x_orbit_uid, x_orbit_device, x_orbit_nonce):
         raise HTTPException(401, "replay")
 
-    # 4) body-hash check WITHOUT consuming stream
-    # If you add a middleware that sets request.state.raw_body_sha256, we'll enforce it.
+    # 4) body-hash check WITHOUT consuming stream (set by the capture middleware)
     cached_sha = getattr(request.state, "raw_body_sha256", None)
     if cached_sha is not None:
         if not hmac.compare_digest(cached_sha, x_orbit_body_sha256.lower()):
             raise HTTPException(401, "bad body hash")
-    # else: skip (assumes TLS / trusted path); still included in signed canonical string.
+    # else: skip (assumes TLS / trusted path); still bound into the signed string.
 
-    # 5) verify HMAC
+    # 5) verify ML-DSA-65 signature over the canonical request string
     try:
-        device_pk_bytes = bytes.fromhex(dev["public_key"])
+        mldsa_pub = bytes.fromhex(mldsa_pub_hex)
+    except ValueError:
+        raise HTTPException(401, "bad device auth public key")
+    if len(mldsa_pub) != pqcrypto.MLDSA_PUBLIC_BYTES:
+        raise HTTPException(401, "bad device auth public key length")
+
+    try:
+        sig = base64.b64decode(x_orbit_sig, validate=True)
     except Exception:
-        raise HTTPException(401, "bad device public key")
+        raise HTTPException(401, "bad signature encoding")
 
-    if len(device_pk_bytes) != 32:
-        raise HTTPException(401, "bad device public key length")
-
-    key = _derive_auth_key(_station_sk_bytes(), device_pk_bytes)
     msg = _canonical(
         request.method,
         request.url.path,
@@ -138,9 +125,8 @@ async def require_delegate(
         x_orbit_nonce,
         x_orbit_body_sha256.lower(),
     )
-    expected = hmac.new(key, msg, hashlib.sha256).hexdigest()
 
-    if not hmac.compare_digest(expected, x_orbit_hmac.lower()):
+    if not pqcrypto.verify(mldsa_pub, msg, sig):
         raise HTTPException(401, "bad auth")
 
     # 6) remember nonce only after successful verification

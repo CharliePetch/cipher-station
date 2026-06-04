@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 class DelegateStart(BaseModel):
     device_uid: str
-    public_key: str
+    mlkem_public_key: str   # ML-KEM-768 (content)
+    mldsa_public_key: str   # ML-DSA-65 (auth)
 
 class DelegateConfirm(BaseModel):
     pairing_id: str
@@ -36,9 +37,11 @@ class DelegateConfirm(BaseModel):
 class InboxMessage(BaseModel):
     type: str
     uid: str | None = None
-    public_key: str | None = None
+    mlkem_public_key: str | None = None   # legacy single-device follow
+    mldsa_public_key: str | None = None
     payload_hex: str | None = None
     devices: list[dict] | None = None
+    ipns_id: str | None = None
 
 class RewrapMessage(BaseModel):
     uid: str
@@ -89,7 +92,8 @@ def startup():
     ensure_directories()
     get_db()
 
-    sk, public_key, pub_json = get_identity()
+    ident = get_identity()
+    pub_json = ident.public_json
     uid = pub_json["uid"]
     device_uid = pub_json.get("device_uid", uid)
 
@@ -97,7 +101,8 @@ def startup():
         add_follower_device(
             uid,
             device_uid,
-            public_key,
+            mlkem_public_key=ident.mlkem_pub_hex,
+            mldsa_public_key=ident.mldsa_pub_hex,
             alias=pub_json.get("alias"),
             allowed="Allowed"
         )
@@ -241,8 +246,8 @@ async def inbox(request: Request, msg: InboxMessage):
     if msg.type != "follow_request":
         await require_delegate(request)
 
-    priv, pub, _ = get_identity()
-    result = process_inbox_message(priv, msg.model_dump())
+    ident = get_identity()
+    result = process_inbox_message(ident.mlkem_sk, msg.model_dump())
     return {"status": "ok", "result": result}
 
 
@@ -254,8 +259,8 @@ def rewrap_route(msg: RewrapMessage, delegate=Depends(require_delegate)):
     if delegate["uid"] != msg.uid or delegate["device_uid"] != msg.device_uid:
         raise HTTPException(status_code=401, detail="header/body mismatch")
 
-    priv, pub, _pub_json = get_identity()
-    result = handle_rewrap_request(priv, msg.model_dump())
+    ident = get_identity()
+    result = handle_rewrap_request(ident.mlkem_sk, msg.model_dump())
     return {"status": "ok", "result": result}
 
 
@@ -360,8 +365,7 @@ def api_list_followers(delegate=Depends(require_delegate)):
     Returns user-level followers (deduplicated from devices),
     excluding the station's own UID.
     """
-    _, _, pub_json = get_identity()
-    self_uid = pub_json["uid"]
+    self_uid = get_identity().uid
 
     raw = list_followers()
 
@@ -390,8 +394,9 @@ def api_list_followers(delegate=Depends(require_delegate)):
 class FollowRequest(BaseModel):
     uid: str
     endpoint: str
-    public_key: str
-    ipns_id: str | None = None  # IPNS peer ID for permanent discovery
+    mlkem_public_key: str               # ML-KEM-768 (content)
+    mldsa_public_key: str | None = None  # ML-DSA-65 (auth), optional for read-only targets
+    ipns_id: str | None = None          # IPNS peer ID for permanent discovery
 
 
 # ---------------------------------------------------------
@@ -399,7 +404,13 @@ class FollowRequest(BaseModel):
 # ---------------------------------------------------------
 @app.post("/follow")
 def api_follow(req: FollowRequest, auth_ctx=Depends(require_delegate)):
-    follow_user(req.uid, req.public_key, req.endpoint, ipns_id=req.ipns_id)
+    follow_user(
+        req.uid,
+        mlkem_public_key=req.mlkem_public_key,
+        endpoint=req.endpoint,
+        mldsa_public_key=req.mldsa_public_key,
+        ipns_id=req.ipns_id,
+    )
 
     cids = rebuild_graphs_and_envelopes()
     prof = get_public_profile()
@@ -409,7 +420,8 @@ def api_follow(req: FollowRequest, auth_ctx=Depends(require_delegate)):
         "action": "follow",
         "target": {
             "uid": req.uid,
-            "public_key": req.public_key,
+            "mlkem_public_key": req.mlkem_public_key,
+            "mldsa_public_key": req.mldsa_public_key,
             "endpoint": req.endpoint,
             "ipns_id": req.ipns_id,
         },
@@ -420,12 +432,11 @@ def api_follow(req: FollowRequest, auth_ctx=Depends(require_delegate)):
 
 class UnfollowRequest(BaseModel):
     uid: str
-    public_key: str
 
 
 @app.post("/unfollow")
 def api_unfollow(req: UnfollowRequest, auth_ctx=Depends(require_delegate)):
-    unfollow_user(req.uid, req.public_key)
+    unfollow_user(req.uid)
 
     cids = rebuild_graphs_and_envelopes()
     prof = get_public_profile()
@@ -433,10 +444,7 @@ def api_unfollow(req: UnfollowRequest, auth_ctx=Depends(require_delegate)):
     return {
         "status": "ok",
         "action": "unfollow",
-        "target": {
-            "uid": req.uid,
-            "public_key": req.public_key
-        },
+        "target": {"uid": req.uid},
         "updated_graph": cids,
         "updated_profile": prof
     }
@@ -444,7 +452,7 @@ def api_unfollow(req: UnfollowRequest, auth_ctx=Depends(require_delegate)):
 
 @app.post("/delegate/start")
 def delegate_start(req: DelegateStart):
-    sess = create_pairing_session(req.device_uid, req.public_key)
+    sess = create_pairing_session(req.device_uid, req.mlkem_public_key, req.mldsa_public_key)
     logger.info(f"Pairing session created: pairing_id={sess.pairing_id}")
     logger.info(f">>> PAIRING PIN: {sess.pin} <<< (expires in 5 minutes)")
     return {"status": "ok", "pairing_id": sess.pairing_id, "expires_in_seconds": 5 * 60}
@@ -452,15 +460,15 @@ def delegate_start(req: DelegateStart):
 
 @app.post("/delegate/confirm")
 def delegate_confirm(req: DelegateConfirm):
-    device_uid, device_public_key = confirm_pairing_session(req.pairing_id, req.pin)
+    device_uid, device_mlkem_pk, device_mldsa_pk = confirm_pairing_session(req.pairing_id, req.pin)
 
-    priv, pub, pub_json = get_identity()
-    uid = pub_json["uid"]
+    uid = get_identity().uid
 
     add_follower_device(
         uid,
         device_uid,
-        device_public_key,
+        mlkem_public_key=device_mlkem_pk,
+        mldsa_public_key=device_mldsa_pk,
         alias=None,
         allowed="Allowed"
     )

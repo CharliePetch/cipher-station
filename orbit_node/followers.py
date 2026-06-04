@@ -11,7 +11,8 @@ from orbit_node.database import get_db
 def add_follower_device(
     uid: str,
     device_uid: str,
-    public_key: str,
+    mlkem_public_key: str,
+    mldsa_public_key: str = None,
     alias: str = None,
     allowed: str = "Allowed",
     endpoint: str = None,
@@ -19,26 +20,32 @@ def add_follower_device(
 ) -> None:
     """
     Registers a device-level follower entry.
-    Supports nullable endpoint for iOS-only read-only followers.
-    ipns_id is the follower's IPFS peer ID for permanent IPNS discovery.
+
+    mlkem_public_key : ML-KEM-768 key used to seal content envelopes (required).
+    mldsa_public_key : ML-DSA-65 key used to verify this device's signed requests
+                       (required for delegate devices that authenticate; may be
+                       NULL for read-only content followers).
     """
     db = get_db()
     db.execute(
         """
-        INSERT OR REPLACE INTO followers(uid, public_key, device_uid, alias, allowed, endpoint, ipns_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO followers(
+            uid, device_uid, mlkem_public_key, mldsa_public_key, alias, allowed, endpoint, ipns_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (uid, public_key, device_uid, alias, allowed, endpoint, ipns_id)
+        (uid, device_uid, mlkem_public_key, mldsa_public_key, alias, allowed, endpoint, ipns_id)
     )
     db.commit()
 
 
-def add_follower(uid: str, public_key: str) -> None:
+def add_follower(uid: str, mlkem_public_key: str, mldsa_public_key: str = None) -> None:
     """
     Legacy fallback path: follower without device info.
     Uses uid as the device_uid and NULL endpoint.
     """
-    add_follower_device(uid, device_uid=uid, public_key=public_key)
+    add_follower_device(uid, device_uid=uid, mlkem_public_key=mlkem_public_key,
+                        mldsa_public_key=mldsa_public_key)
 
 
 def remove_follower(uid: str) -> None:
@@ -54,66 +61,52 @@ def remove_follower(uid: str) -> None:
 # LIST HELPERS
 # ---------------------------------------------------------
 
+def _row_to_follower(r) -> Dict:
+    return {
+        "uid": r["uid"],
+        "device_uid": r["device_uid"],
+        "mlkem_public_key": r["mlkem_public_key"],
+        "mldsa_public_key": r["mldsa_public_key"],
+        "alias": r["alias"],
+        "allowed": r["allowed"],
+        "endpoint": r["endpoint"],
+        "ipns_id": r["ipns_id"],
+    }
+
+
 def list_followers() -> List[Dict]:
-    """
-    Return all follower device entries, including endpoint and ipns_id.
-    """
+    """Return all follower device entries."""
     db = get_db()
     rows = db.execute(
         """
-        SELECT uid, public_key, device_uid, alias, allowed, endpoint, ipns_id
+        SELECT uid, device_uid, mlkem_public_key, mldsa_public_key, alias, allowed, endpoint, ipns_id
         FROM followers
         ORDER BY uid, device_uid
         """
     ).fetchall()
-
-    return [
-        {
-            "uid": r["uid"],
-            "public_key": r["public_key"],
-            "device_uid": r["device_uid"],
-            "alias": r["alias"],
-            "allowed": r["allowed"],
-            "endpoint": r["endpoint"],
-            "ipns_id": r["ipns_id"],
-        }
-        for r in rows
-    ]
+    return [_row_to_follower(r) for r in rows]
 
 
 def list_follower_devices(uid: str) -> List[Dict]:
-    """
-    Return all devices for a single follower, including endpoint and ipns_id.
-    """
+    """Return all devices for a single follower."""
     db = get_db()
     rows = db.execute(
         """
-        SELECT device_uid, public_key, alias, allowed, endpoint, ipns_id
+        SELECT uid, device_uid, mlkem_public_key, mldsa_public_key, alias, allowed, endpoint, ipns_id
         FROM followers
         WHERE uid = ?
         ORDER BY device_uid
         """,
         (uid,)
     ).fetchall()
-
-    return [
-        {
-            "device_uid": r["device_uid"],
-            "public_key": r["public_key"],
-            "alias": r["alias"],
-            "allowed": r["allowed"],
-            "endpoint": r["endpoint"],
-            "ipns_id": r["ipns_id"],
-        }
-        for r in rows
-    ]
+    return [_row_to_follower(r) for r in rows]
 
 
 def list_all_public_keys() -> List[str]:
     """
-    Return all public keys across all followers.
+    Return all ML-KEM public keys across all followers.
     Useful for envelope regeneration.
     """
     db = get_db()
-    rows = db.execute("SELECT public_key FROM followers").fetchall()
-    return [r["public_key"] for r in rows]
+    rows = db.execute("SELECT mlkem_public_key FROM followers").fetchall()
+    return [r["mlkem_public_key"] for r in rows]

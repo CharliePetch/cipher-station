@@ -3,9 +3,9 @@
 import json
 from typing import Dict, List, Tuple, Optional
 
-from nacl.public import PrivateKey
 from nacl.secret import SecretBox
 
+from orbit_node import pqcrypto
 from orbit_node.config import PUBLIC_JSON_PATH
 from orbit_node.envelopes import open_envelope, encrypt_key_for_follower
 from orbit_node.followers import list_followers
@@ -103,7 +103,7 @@ def _get_root_envelope_hex_for_uid(entry: dict, uid: str) -> Optional[str]:
     return None
 
 
-def rewrap_all_posts(private_key: PrivateKey, debug: bool = False) -> dict:
+def rewrap_all_posts(mlkem_sk: bytes, debug: bool = False) -> dict:
     """
     Rewrap follower envelopes for every post in the manifest **where audience_mode == "all"**,
     republish per-post envelopes JSON to IPFS,
@@ -117,8 +117,8 @@ def rewrap_all_posts(private_key: PrivateKey, debug: bool = False) -> dict:
     follower_keys: List[Tuple[str, str]] = []
     for f in followers:
         uid = f.get("uid")
-        pk = f.get("public_key")
-        if isinstance(uid, str) and uid and isinstance(pk, str) and len(pk) == 64:
+        pk = f.get("mlkem_public_key")
+        if isinstance(uid, str) and uid and isinstance(pk, str) and len(pk) == pqcrypto.MLKEM_PUBLIC_HEX:
             follower_keys.append((uid, pk))
 
     manifest = load_manifest()
@@ -194,7 +194,7 @@ def rewrap_all_posts(private_key: PrivateKey, debug: bool = False) -> dict:
             continue
 
         try:
-            sym_key = open_envelope(private_key, root_env_hex)
+            sym_key = open_envelope(mlkem_sk, root_env_hex)
         except Exception as e:
             sym_key = None
             skipped_posts += 1

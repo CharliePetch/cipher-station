@@ -3,26 +3,26 @@ import json
 import logging
 from typing import Literal, Optional
 
-from nacl.public import PrivateKey
 from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
 
 from orbit_node.ipfs_client import ipfs_add_bytes, ipfs_get_bytes
 from orbit_node.followers import list_followers
-from orbit_node.manifest import add_post_to_manifest, load_manifest, remove_post_from_manifest
+from orbit_node.manifest import add_post_to_manifest, add_public_post_to_manifest, load_manifest, remove_post_from_manifest
 from orbit_node.identity import get_identity
 from orbit_node.envelopes import open_envelope, encrypt_key_for_follower
 
 logger = logging.getLogger(__name__)
 
-# Back-compat: older clients used "all_followers"
-AudienceMode = Literal["self", "specific", "all", "all_followers"]
+# Back-compat: older clients used "all_followers".
+# "public" posts are stored UNENCRYPTED on IPFS with no envelopes.
+AudienceMode = Literal["self", "specific", "all", "all_followers", "public"]
 
 
-def _normalize_audience_mode(mode: str) -> Literal["self", "specific", "all"]:
+def _normalize_audience_mode(mode: str) -> Literal["self", "specific", "all", "public"]:
     if mode == "all_followers":
         return "all"
-    if mode in ("self", "specific", "all"):
+    if mode in ("self", "specific", "all", "public"):
         return mode  # type: ignore[return-value]
     raise ValueError(f"Invalid audience_mode: {mode}")
 
@@ -77,23 +77,24 @@ def _force_self_row(
     *,
     followers: list[dict],
     self_uid: str,
-    station_pk_hex: str,
+    station_mlkem_pub_hex: str,
     pub_json: dict,
 ) -> list[dict]:
     """
-    Ensure exactly one 'self' row exists and it is sealed to the station public key.
+    Ensure exactly one 'self' row exists and it is sealed to the station's
+    ML-KEM public key (so the station can later recover the key for reshare/rewrap).
     """
     followers = [f for f in followers if f.get("uid") != self_uid]
     followers.insert(
         0,
         {
             "uid": self_uid,
-            "public_key": station_pk_hex,   # key that matches station_sk
-            "device_uid": self_uid,         # treat as "root" device
+            "mlkem_public_key": station_mlkem_pub_hex,  # key that matches station mlkem_sk
+            "device_uid": self_uid,                     # treat as "root" device
             "alias": pub_json.get("alias"),
             "allowed": "Allowed",
             "endpoint": pub_json.get("endpoint"),
-            "ipns_id": pub_json.get("ipfs_peer_id"),  # permanent IPNS discovery address
+            "ipns_id": pub_json.get("ipfs_peer_id"),    # permanent IPNS discovery address
         },
     )
     return followers
@@ -114,8 +115,8 @@ def _filter_followers_for_audience(
       - deduped to one row per uid
       - NOT including self yet (we add self separately)
     """
-    if audience_mode == "self":
-        return []  # we’ll add self explicitly later
+    if audience_mode in ("self", "public"):
+        return []  # self handled separately; public has no envelopes at all
 
     if audience_mode == "all":
         return followers_user_level
@@ -156,21 +157,48 @@ def handle_new_post(
       - "self": only self gets an envelope
       - "specific": self + specified Allowed follower uids
       - "all" / (legacy "all_followers"): self + all Allowed followers
+      - "public": NO encryption — file is uploaded as-is and is readable by anyone
+                  via IPFS (no envelopes, plaintext metadata)
 
     Notes:
       - Envelopes are published as a separate JSON to IPFS
       - Manifest stores envelopes_cid (not envelopes inline)
       - Followers list is deduped to ONE device per uid
-      - Self uid is forced to station public key (not delegate device)
+      - Self uid is forced to the station ML-KEM public key (not delegate device)
     """
     # Load the station identity (source of truth for "self")
-    _station_sk, station_pk_hex, pub_json = get_identity()
-    self_uid = pub_json.get("uid")
+    ident = get_identity()
+    station_mlkem_pub_hex = ident.mlkem_pub_hex
+    pub_json = ident.public_json
+    self_uid = ident.uid
     if not self_uid or not isinstance(self_uid, str):
         raise ValueError("Identity missing uid in public.json")
 
     # ✅ normalize legacy value
     aud_mode = _normalize_audience_mode(audience_mode)
+
+    # ------------------------------------------------------------------
+    # PUBLIC posts: no encryption, no envelopes, plaintext metadata.
+    # ------------------------------------------------------------------
+    if aud_mode == "public":
+        cid = ipfs_add_bytes(file_bytes)
+        logger.info(f"Public (unencrypted) post uploaded: CID={cid}")
+        manifest = add_public_post_to_manifest(
+            post_cid=cid,
+            metadata=metadata if isinstance(metadata, dict) else None,
+            client=client,
+        )
+        return {
+            "status": "post_ok",
+            "cid": cid,
+            "envelopes_cid": None,
+            "audience_mode": "public",
+            "encrypted": False,
+            "audience_uids": None,
+            "followers_raw": 0,
+            "followers_used": 0,
+            "manifest_posts": sum(len(b.get("posts", [])) for b in manifest.get("clients", {}).values()),
+        }
 
     # 1) Fresh symmetric key (per post)
     sym_key = nacl_random(SecretBox.KEY_SIZE)
@@ -198,11 +226,11 @@ def handle_new_post(
         audience_uids=audience_uids,
     )
 
-    # 4c) Force "self" envelope to the station public key
+    # 4c) Force "self" envelope to the station ML-KEM public key
     followers_for_envelopes = _force_self_row(
         followers=recipients,
         self_uid=self_uid,
-        station_pk_hex=station_pk_hex,
+        station_mlkem_pub_hex=station_mlkem_pub_hex,
         pub_json=pub_json,
     )
 
@@ -224,12 +252,16 @@ def handle_new_post(
         client=client,                 # client app name (e.g., "orbitstagram", "drive")
     )
 
-    # 7) Pull the envelopes CID from the new entry (just appended)
+    # 7) Pull the envelopes CID from the new entry (just appended) in the
+    #    client bucket of the new manifest shape {"clients": {<client>: {"posts": [...]}}}.
+    client_key = (client or "default").strip() or "default"
     envelopes_cid = None
     try:
-        envelopes_cid = manifest["posts"][-1].get("envelopes_cid")
+        envelopes_cid = manifest["clients"][client_key]["posts"][-1].get("envelopes_cid")
     except Exception:
         pass
+
+    total_posts = sum(len(b.get("posts", [])) for b in manifest.get("clients", {}).values())
 
     return {
         "status": "post_ok",
@@ -239,7 +271,7 @@ def handle_new_post(
         "audience_uids": (audience_uids or []) if aud_mode == "specific" else None,
         "followers_raw": len(followers_raw),
         "followers_used": len(followers_for_envelopes),
-        "manifest_posts": len(manifest.get("posts", [])),
+        "manifest_posts": total_posts,
     }
 
 
@@ -254,15 +286,21 @@ def handle_reshare_post(
     Update a post's audience by removing and re-creating its manifest entry
     with new envelopes.
 
-    The station recovers the symmetric key from its own sealed-box envelope,
+    The station recovers the symmetric key from its own ML-KEM envelope,
     then re-encrypts for the new audience set.
     """
-    station_sk, station_pk_hex, pub_json = get_identity()
-    self_uid = pub_json.get("uid")
+    ident = get_identity()
+    station_mlkem_pub_hex = ident.mlkem_pub_hex
+    pub_json = ident.public_json
+    self_uid = ident.uid
     if not self_uid:
         raise ValueError("Identity missing uid")
 
     aud_mode = _normalize_audience_mode(audience_mode)
+    if aud_mode == "public":
+        # Converting an encrypted post to public (or resharing a public post)
+        # is out of scope: a public post has no recoverable symmetric key here.
+        raise ValueError("Resharing to/from 'public' is not supported; create a new public post instead")
 
     # 1) Find the existing post entry in the manifest
     manifest = load_manifest(client=client)
@@ -297,8 +335,7 @@ def handle_reshare_post(
     if not self_envelope_hex:
         return {"status": "error", "detail": "No self envelope found; cannot recover key"}
 
-    # station_sk is already a PrivateKey from get_identity()
-    sym_key = open_envelope(station_sk, self_envelope_hex)
+    sym_key = open_envelope(ident.mlkem_sk, self_envelope_hex)
     if not sym_key or len(sym_key) != SecretBox.KEY_SIZE:
         return {"status": "error", "detail": "Failed to recover symmetric key"}
 
@@ -317,7 +354,7 @@ def handle_reshare_post(
     followers_for_envelopes = _force_self_row(
         followers=recipients,
         self_uid=self_uid,
-        station_pk_hex=station_pk_hex,
+        station_mlkem_pub_hex=station_mlkem_pub_hex,
         pub_json=pub_json,
     )
 
