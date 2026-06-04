@@ -1,15 +1,11 @@
 # tests/test_auth.py
 
-import hashlib
-import hmac as hmac_mod
 import time
 
 import pytest
-from nacl.public import PrivateKey
-from nacl.encoding import HexEncoder
-from nacl import bindings
 
-from orbit_node.auth import _derive_auth_key, _canonical
+from orbit_node.auth import _canonical
+from orbit_node import pqcrypto
 
 
 class TestCanonicalString:
@@ -25,81 +21,35 @@ class TestCanonicalString:
     def test_all_fields_present(self):
         result = _canonical("DELETE", "/api/v1", "user", "device", "999", "abc", "sha")
         parts = result.decode().split("\n")
-        assert len(parts) == 7
-        assert parts[0] == "DELETE"
-        assert parts[1] == "/api/v1"
-        assert parts[2] == "user"
-        assert parts[3] == "device"
-        assert parts[4] == "999"
-        assert parts[5] == "abc"
-        assert parts[6] == "sha"
+        assert parts == ["DELETE", "/api/v1", "user", "device", "999", "abc", "sha"]
 
 
-class TestAuthKeyDerivation:
-    def test_deterministic(self):
-        sk_a = PrivateKey.generate()
-        sk_b = PrivateKey.generate()
+class TestMLDSASignVerify:
+    def test_sign_and_verify(self, mldsa_keypair):
+        sk, pk = mldsa_keypair
+        msg = _canonical("POST", "/post", "uid1", "dev1", "12345", "nonce1", "bodysha")
+        sig = pqcrypto.sign(sk, msg)
+        assert pqcrypto.verify(pk, msg, sig)
 
-        key1 = _derive_auth_key(sk_a.encode(), sk_b.public_key.encode())
-        key2 = _derive_auth_key(sk_a.encode(), sk_b.public_key.encode())
-        assert key1 == key2
+    def test_wrong_key_fails(self, mldsa_keypair):
+        sk, _ = mldsa_keypair
+        _, wrong_pk = pqcrypto.generate_mldsa_keypair()
+        msg = _canonical("POST", "/post", "uid1", "dev1", "12345", "nonce1", "bodysha")
+        sig = pqcrypto.sign(sk, msg)
+        assert not pqcrypto.verify(wrong_pk, msg, sig)
 
-    def test_key_length(self):
-        sk_a = PrivateKey.generate()
-        sk_b = PrivateKey.generate()
-        key = _derive_auth_key(sk_a.encode(), sk_b.public_key.encode())
-        assert len(key) == 32
+    def test_tampered_message_fails(self, mldsa_keypair):
+        sk, pk = mldsa_keypair
+        msg = _canonical("POST", "/post", "uid1", "dev1", "12345", "nonce1", "bodysha")
+        tampered = _canonical("POST", "/post", "uid1", "dev1", "12345", "nonce1", "TAMPERED")
+        sig = pqcrypto.sign(sk, msg)
+        assert pqcrypto.verify(pk, msg, sig)
+        assert not pqcrypto.verify(pk, tampered, sig)
 
-    def test_different_pairs_different_keys(self):
-        sk_a = PrivateKey.generate()
-        sk_b = PrivateKey.generate()
-        sk_c = PrivateKey.generate()
-
-        key_ab = _derive_auth_key(sk_a.encode(), sk_b.public_key.encode())
-        key_ac = _derive_auth_key(sk_a.encode(), sk_c.public_key.encode())
-        assert key_ab != key_ac
-
-
-class TestHMACSignVerify:
-    def test_sign_and_verify(self):
-        sk_station = PrivateKey.generate()
-        sk_device = PrivateKey.generate()
-
-        auth_key = _derive_auth_key(sk_station.encode(), sk_device.public_key.encode())
-
-        msg = _canonical("POST", "/upload", "uid1", "dev1", "12345", "nonce1", "bodysha")
-        sig = hmac_mod.new(auth_key, msg, hashlib.sha256).hexdigest()
-
-        expected = hmac_mod.new(auth_key, msg, hashlib.sha256).hexdigest()
-        assert hmac_mod.compare_digest(sig, expected)
-
-    def test_wrong_key_fails(self):
-        sk_station = PrivateKey.generate()
-        sk_device = PrivateKey.generate()
-        sk_wrong = PrivateKey.generate()
-
-        auth_key = _derive_auth_key(sk_station.encode(), sk_device.public_key.encode())
-        wrong_key = _derive_auth_key(sk_station.encode(), sk_wrong.public_key.encode())
-
-        msg = _canonical("POST", "/upload", "uid1", "dev1", "12345", "nonce1", "bodysha")
-        sig = hmac_mod.new(auth_key, msg, hashlib.sha256).hexdigest()
-        wrong_sig = hmac_mod.new(wrong_key, msg, hashlib.sha256).hexdigest()
-
-        assert not hmac_mod.compare_digest(sig, wrong_sig)
-
-    def test_tampered_message_fails(self):
-        sk_station = PrivateKey.generate()
-        sk_device = PrivateKey.generate()
-
-        auth_key = _derive_auth_key(sk_station.encode(), sk_device.public_key.encode())
-
-        msg_original = _canonical("POST", "/upload", "uid1", "dev1", "12345", "nonce1", "bodysha")
-        msg_tampered = _canonical("POST", "/upload", "uid1", "dev1", "12345", "nonce1", "TAMPERED")
-
-        sig = hmac_mod.new(auth_key, msg_original, hashlib.sha256).hexdigest()
-        tampered_sig = hmac_mod.new(auth_key, msg_tampered, hashlib.sha256).hexdigest()
-
-        assert not hmac_mod.compare_digest(sig, tampered_sig)
+    def test_verify_never_raises_on_garbage(self, mldsa_keypair):
+        _, pk = mldsa_keypair
+        assert pqcrypto.verify(pk, b"msg", b"not-a-signature") is False
+        assert pqcrypto.verify(b"short-pubkey", b"msg", b"sig") is False
 
 
 class TestNonceReplay:
@@ -110,17 +60,12 @@ class TestNonceReplay:
         ts = int(time.time())
 
         assert not _nonce_seen(uid, dev, nonce)
-
         _remember_nonce(uid, dev, nonce, ts)
-
         assert _nonce_seen(uid, dev, nonce)
 
     def test_different_nonce_not_seen(self):
         from orbit_node.auth import _nonce_seen, _remember_nonce
 
         uid, dev = "user1", "device1"
-        ts = int(time.time())
-
-        _remember_nonce(uid, dev, "nonce-A", ts)
-
+        _remember_nonce(uid, dev, "nonce-A", int(time.time()))
         assert not _nonce_seen(uid, dev, "nonce-B")
