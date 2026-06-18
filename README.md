@@ -133,7 +133,24 @@ See [PROTOCOL.md](PROTOCOL.md) Appendix B for the full configuration reference.
 
 ML-KEM is a Key Encapsulation Mechanism, so a post's symmetric key is wrapped using the standard **KEM-DEM** construction: encapsulate to the recipient's ML-KEM key, derive a wrapping key from the shared secret with BLAKE2b, and SecretBox-wrap the post key. Device authentication signs the canonical request string with ML-DSA instead of deriving an HMAC key from an (X25519) ECDH.
 
-> **Caveats.** The post-quantum primitives use the pure-Python [`kyber-py`](https://pypi.org/project/kyber-py/) and [`dilithium-py`](https://pypi.org/project/dilithium-py/) libraries — chosen because they install with no native build on a Raspberry Pi. They are **not constant-time** and are self-described as educational; in Orbit's model decapsulation and signing happen client-side (never as a server oracle), so timing side-channels are low-risk, but this is not a hardened production crypto stack. This release is also a **hard breaking change** — there is no migration from older X25519 stations, and every client must implement ML-KEM envelope opening and ML-DSA request signing.
+> **Caveats.** By default the post-quantum primitives use the pure-Python [`kyber-py`](https://pypi.org/project/kyber-py/) and [`dilithium-py`](https://pypi.org/project/dilithium-py/) libraries — chosen because they install with no native build on a Raspberry Pi. They are **not constant-time** and are self-described as educational; in Orbit's model decapsulation and signing happen client-side (never as a server oracle), so timing side-channels are low-risk, but this is not a hardened production crypto stack. For a **constant-time** implementation, install the optional [Open Quantum Safe](https://openquantumsafe.org/) `liboqs` backend (see below). This release is also a **hard breaking change** — there is no migration from older X25519 stations, and every client must implement ML-KEM envelope opening and ML-DSA request signing.
+
+#### Optional: constant-time backend (liboqs)
+
+The ML-KEM / ML-DSA math is provided by a pluggable backend, selected with `ORBIT_PQC_BACKEND`:
+
+| Value | Backend | Notes |
+|-------|---------|-------|
+| `auto` (default) | liboqs if available, else pure-Python | Self-tests liboqs at startup and falls back safely |
+| `liboqs` | Open Quantum Safe (C) | **Constant-time / hardened.** Requires the `oqs` binding (native build) |
+| `python` | kyber-py + dilithium-py | Pure-Python, no native build |
+
+Both backends implement the same FIPS standards, so keys, envelopes, and signatures are fully interoperable — you can switch backends without re-bootstrapping. To enable the hardened backend:
+
+```bash
+pip install oqs            # builds/links liboqs; needs cmake + a C compiler
+# then restart with ORBIT_PQC_BACKEND=auto (default) or =liboqs to require it
+```
 
 ## API
 
@@ -236,6 +253,7 @@ orbit/
 │   ├── tunnel.py           # Cloudflare tunnel monitor
 │   ├── profile.py          # /profile endpoint
 │   ├── config.py           # Configuration loading
+│   ├── backup.py           # USB backup & restore (create/restore CLI)
 │   └── database.py         # SQLite schema
 ├── orbit_data/             # Runtime data (created on first run)
 │   ├── keys/mlkem.bin      # Station ML-KEM-768 keypair (content)
@@ -264,6 +282,53 @@ ipfs id -f='<id>'
 # Check tunnel URL
 sudo journalctl -u cloudflared-tunnel -f
 ```
+
+## Backup & Restore
+
+microSD cards fail. A backup captures **everything that makes the station yours** —
+your Orbit keys, the database, the manifest, **and** the IPFS peer identity (your
+permanent peer ID / IPNS address) plus the pinned post content — into a single
+portable archive on a USB drive, so you can rebuild on a fresh card or box and
+come back at the **same address with the same posts**.
+
+### Create a backup
+
+Plug in a USB drive, then:
+
+```bash
+# Auto-detects a mounted USB drive (or set ORBIT_BACKUP_DEST / pass --dest)
+.venv/bin/python -m orbit_node.backup create
+
+# Explicit destination, or encrypt the archive with a passphrase:
+.venv/bin/python -m orbit_node.backup create --dest /media/$USER/MYDRIVE
+.venv/bin/python -m orbit_node.backup create --passphrase 'correct horse battery staple'
+
+# List backups found on the drive
+.venv/bin/python -m orbit_node.backup list
+```
+
+A **daily backup also runs automatically** whenever a USB drive is mounted, via
+the `orbit-backup.timer` systemd unit the installer sets up (it cleanly no-ops
+when no drive is present). Set a fixed destination with `ORBIT_BACKUP_DEST` in
+`.env`.
+
+> ⚠️ **Unencrypted backups contain your private keys** (Orbit + the IPFS node
+> key + your `.env`). Keep the drive physically secure, or use `--passphrase`.
+
+### Restore onto a fresh station
+
+During install, point `install.sh` at a backup:
+
+```bash
+./install.sh --restore                                   # auto-detect a backup on a mounted USB
+./install.sh --restore=/media/<user>/<drive>/orbit-backup-<id>-<ts>.tar.gz
+```
+
+Restore reinstates `orbit_data/`, the IPFS peer identity, and the pinned content
+**before** a fresh identity would be generated — so `ipfs id` returns your
+original peer ID and followers can still find you. (If you used a passphrase, it
+will be prompted for.) The archive format is documented in
+[PROTOCOL.md](PROTOCOL.md).
 
 ## Running Tests
 

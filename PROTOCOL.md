@@ -1046,6 +1046,16 @@ Returns station health status.
 
 **Authentication:** None
 
+**Response:** `{"status": "healthy" | "degraded", "checks": {"database": bool, "ipfs": bool, "identity": bool}}`. HTTP 200 when all checks pass, 503 otherwise.
+
+#### `GET /storage`
+
+Returns IPFS repo usage, device disk usage, and a per-client storage breakdown computed from the manifest.
+
+**Authentication:** None
+
+> NOTE: this endpoint is currently unauthenticated and reveals repo/disk usage figures. Place it behind auth or remove it if that is sensitive in your deployment.
+
 ### 14.2 Unauthenticated Endpoints
 
 #### `POST /inbox`
@@ -1121,6 +1131,47 @@ Remove an outbound follow.
 ```
 
 Triggers a social graph rebuild.
+
+#### `GET /followers`
+
+List user-level followers for a share picker: Allowed followers deduplicated to one entry per uid, excluding the station's own uid.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "followers": [
+    { "uid": "...", "alias": "... | null", "endpoint": "... | null", "ipns_id": "... | null" }
+  ]
+}
+```
+
+#### `POST /post/delete`
+
+Remove a post from the manifest, unpin its content + envelopes from IPFS, and run garbage collection.
+
+**Request body:**
+```json
+{ "post_cid": "<cid>", "client": "<client | optional>" }
+```
+
+Returns 404 if the post is not found in the manifest.
+
+#### `POST /post/share`
+
+Re-wrap an existing post for a new audience (re-issue envelopes without re-uploading content). The station recovers the post's symmetric key from its own self-envelope and re-encrypts it for the new recipient set.
+
+**Request body:**
+```json
+{
+  "post_cid": "<cid>",
+  "audience_mode": "specific",
+  "audience_uids": ["<uid>", "..."],
+  "client": "<client | optional>"
+}
+```
+
+`audience_mode` accepts `self`, `specific`, or `all` — **not** `public` (resharing to/from `public` is unsupported; create a new public post instead). Returns 400 on an invalid audience and 404 if the post is not found.
 
 ### 14.4 Pairing Endpoints
 
@@ -1414,7 +1465,15 @@ Follow requests targeting the station's own uid MUST be rejected. This prevents 
 
 ### 17.7 Post-Quantum Library Maturity
 
-Orbit's post-quantum primitives are provided by `kyber-py` (ML-KEM-768) and `dilithium-py` (ML-DSA-65). These are pure-Python implementations that are NOT constant-time and are self-described as educational. In Orbit's trust model, ML-KEM decapsulation and ML-DSA signing happen client-side on the device holding the secret key — never as a server-side oracle that an attacker can repeatedly query — so timing side-channels are low-risk in practice. Nonetheless, implementers SHOULD treat this as a not-yet-hardened production crypto stack and substitute a constant-time, audited implementation where the threat model demands it.
+Orbit's post-quantum primitives are provided by a pluggable backend, selected via the `ORBIT_PQC_BACKEND` environment variable:
+
+- **`python`** (default fallback) — pure-Python `kyber-py` (ML-KEM-768) and `dilithium-py` (ML-DSA-65). These are NOT constant-time and are self-described as educational. Chosen because they install with no native build (piwheels-friendly on a Raspberry Pi).
+- **`liboqs`** — the Open Quantum Safe C library via the `oqs` binding. **Constant-time and hardened**, but requires a native build (cmake + C compiler).
+- **`auto`** (default) — use `liboqs` if it imports AND passes a startup self-test (ML-KEM and ML-DSA round-trips), otherwise fall back to `python`. The self-test guarantees a broken or version-mismatched backend never goes live.
+
+Both backends implement the same FIPS 203 / FIPS 204 standards with identical key, ciphertext, and signature encodings, so envelopes and signatures are interoperable across backends and the KEM-DEM wire format (Section 6) is backend-independent. A station may switch backends without re-bootstrapping its identity.
+
+In Orbit's trust model, ML-KEM decapsulation and ML-DSA signing happen client-side on the device holding the secret key — never as a server-side oracle that an attacker can repeatedly query — so timing side-channels in the pure-Python backend are low-risk in practice. Implementers whose threat model includes a high-rate timing oracle SHOULD deploy the `liboqs` backend.
 
 ---
 
@@ -1816,10 +1875,11 @@ CREATE TABLE pairing_sessions (
 | `ORBIT_PORT` | `8443` | HTTPS port for the Orbit station API |
 | `ORBIT_HOST` | `0.0.0.0` | Bind address for the station server |
 | `ORBIT_PASSWORD` | _(empty)_ | Optional password to encrypt the secret-key files (`mlkem.bin`, `mldsa.bin`) at rest (Argon2i) |
+| `ORBIT_PQC_BACKEND` | `auto` | PQC backend: `auto` (liboqs if available+self-test passes, else python), `liboqs` (constant-time, requires `oqs`), or `python` (pure-Python) |
 | `IPFS_API_URL` | `http://127.0.0.1:5001` | IPFS daemon HTTP API URL |
 | `IPFS_TIMEOUT` | `30` | Default timeout (seconds) for IPFS operations |
 | `IPFS_MAX_RETRIES` | `3` | Maximum retry attempts for transient IPFS errors |
-| `ORBIT_BASE_DIR` | `./orbit_data` | Root directory for station data |
+| `ORBIT_BASE_DIR` | `<project>/orbit_data` | Root directory for station data. Defaults to a folder next to `run.py`; relative values are resolved against the project directory (not the cwd), absolute values are used as-is. |
 | `SSL_CERTFILE` | `./orbit_data/ssl/cert.pem` | Path to TLS certificate |
 | `SSL_KEYFILE` | `./orbit_data/ssl/key.pem` | Path to TLS private key |
 | `MAX_UPLOAD_SIZE` | `104857600` (100 MB) | Maximum upload size for post content |
@@ -1829,6 +1889,7 @@ CREATE TABLE pairing_sessions (
 | `CLOUDFLARE_METRICS_PORT` | `40469` | Port for cloudflared's metrics/quicktunnel endpoint |
 | `ORBIT_MAX_DEVICES_PER_FOLLOWER` | `20` | Maximum devices per follower uid |
 | `ORBIT_AUTO_REWRAP_ON_FOLLOW_CHANGE` | `1` | Enable auto-rewrap when followers change (`0` to disable) |
+| `ORBIT_BACKUP_DEST` | _(empty)_ | Destination dir for `orbit_node.backup create` and the backup timer; blank → auto-detect a mounted USB drive |
 | `MAX_SKEW_SECONDS` | `60` | Maximum clock skew for authenticated requests |
 | `NONCE_TTL_SECONDS` | `86400` | How long to retain nonces (24 hours) |
 | `PIN_LEN` | `6` | Length of pairing PIN |
@@ -1837,7 +1898,72 @@ CREATE TABLE pairing_sessions (
 
 ---
 
-## Appendix C: References
+## Appendix C: Backup Archive Format
+
+A station's recoverable state spans `orbit_data/` **and** the IPFS repo (content
+bytes + the node identity that determines the permanent peer ID / IPNS address).
+`orbit_node.backup` packages all of it into a single portable archive so a fresh
+`install.sh --restore` reproduces the station byte-for-byte (same peer ID, same
+keys, same posts).
+
+### D.1 Filename
+
+```
+orbit-backup-<peerid8>-<UTCstamp>.tar.gz        # plaintext
+orbit-backup-<peerid8>-<UTCstamp>.tar.gz.enc    # passphrase-encrypted
+```
+
+`<peerid8>` is the first 8 chars of the IPFS peer ID (or `noipfs`); `<UTCstamp>`
+is `YYYYMMDDTHHMMSSZ`. An encrypted archive is the gzipped tar wrapped with the
+at-rest scheme of Section 4.4 (16-byte salt + Argon2i-derived SecretBox).
+
+### D.2 Contents (tar members)
+
+| Member | Description |
+|--------|-------------|
+| `backup.json` | Metadata (see D.3) |
+| `orbit_data/keys/mlkem.bin`, `orbit_data/keys/mldsa.bin` | Secret-key files, copied as-is (still ORBIT_PASSWORD-encrypted if that was set) |
+| `orbit_data/public.json` | Public identity document |
+| `orbit_data/orbit.db` | Consistent SQLite snapshot taken via the backup API (WAL-safe) |
+| `orbit_data/manifests/manifest.json` | The manifest |
+| `env` | The project `.env` (config that pairs with the keys) |
+| `ipfs_identity.json` | `{"PeerID","PrivKey"}` read from the IPFS repo `config` `Identity` |
+| `content/<cid>.car` | One CAR file per recursively-pinned IPFS root |
+| `pinned_roots.txt` | Newline-separated root CIDs to re-pin on restore |
+
+Excluded: `orbit_data/ssl/` (regenerated on first run) and the derived plaintext
+graph dumps. Any member that does not exist on the source station is simply
+omitted (and absent from `backup.json.contents`).
+
+### D.3 `backup.json`
+
+```json
+{
+  "schema_version": 1,
+  "tool": "orbit-backup",
+  "created_at": "<ISO 8601 UTC>",
+  "peer_id": "<ipfs peer id | null>",
+  "uid": "<station uid | null>",
+  "encrypted": false,
+  "pinned_root_count": 12,
+  "contents": ["orbit_data/keys/mlkem.bin", "..."],
+  "sha256": { "orbit_data/keys/mlkem.bin": "<hex>", "...": "..." }
+}
+```
+
+### D.4 Restore semantics
+
+A restorer MUST: validate `schema_version`; lay `orbit_data/` and `env` back into
+the project; ensure an IPFS repo exists and set `Identity.PeerID`/`Identity.PrivKey`
+from `ipfs_identity.json`; `dag import` every `content/*.car`; and `pin add` each
+CID in `pinned_roots.txt`. Restore is offline-capable (uses the `ipfs` CLI against
+the repo, no daemon required) and refuses to overwrite a populated `orbit_data/`
+unless forced. See Section 5.2 for key-file layout and Section 4.4 for the
+encryption wrapper.
+
+---
+
+## Appendix D: References
 
 - **NaCl / libsodium:** https://doc.libsodium.org/
 - **PyNaCl:** https://pynacl.readthedocs.io/
