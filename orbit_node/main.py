@@ -17,9 +17,16 @@ from orbit_node.following import follow_user, unfollow_user
 from orbit_node.graph import rebuild_graphs_and_envelopes
 from orbit_node.database import get_db
 from orbit_node.identity import get_identity
-from orbit_node.followers import add_follower_device, list_followers
-from orbit_node.pairing import create_pairing_session, confirm_pairing_session
-from orbit_node.auth import require_delegate
+from orbit_node.followers import (
+    add_follower_device,
+    list_followers,
+    approve_follower,
+    list_pending_followers,
+    remove_follower,
+)
+from orbit_node.rewrap_envelopes import rewrap_all_posts
+from orbit_node.pairing import create_pairing_session, confirm_pairing_session, PairingThrottled
+from orbit_node.auth import require_delegate, require_owner
 from orbit_node.tunnel import start_tunnel_monitor
 
 logger = logging.getLogger(__name__)
@@ -255,7 +262,7 @@ async def inbox(request: Request, msg: InboxMessage):
 # REWRAP
 # ---------------------------------------------------------
 @app.post("/rewrap")
-def rewrap_route(msg: RewrapMessage, delegate=Depends(require_delegate)):
+def rewrap_route(msg: RewrapMessage, delegate=Depends(require_owner)):
     if delegate["uid"] != msg.uid or delegate["device_uid"] != msg.device_uid:
         raise HTTPException(status_code=401, detail="header/body mismatch")
 
@@ -269,7 +276,7 @@ def rewrap_route(msg: RewrapMessage, delegate=Depends(require_delegate)):
 # ---------------------------------------------------------
 @app.post("/post")
 def create_post(
-    delegate=Depends(require_delegate),
+    delegate=Depends(require_owner),
     file: UploadFile = File(...),
     metadata: str = Form(None),
     client: str = Form(None),
@@ -311,7 +318,7 @@ class DeletePostRequest(BaseModel):
 
 
 @app.post("/post/delete")
-def delete_post(req: DeletePostRequest, delegate=Depends(require_delegate)):
+def delete_post(req: DeletePostRequest, delegate=Depends(require_owner)):
     result = remove_post_from_manifest(req.post_cid, client=req.client)
     if result["status"] == "not_found":
         raise HTTPException(status_code=404, detail=f"Post {req.post_cid} not found in manifest")
@@ -329,7 +336,7 @@ class SharePostRequest(BaseModel):
 
 
 @app.post("/post/share")
-def share_post(req: SharePostRequest, delegate=Depends(require_delegate)):
+def share_post(req: SharePostRequest, delegate=Depends(require_owner)):
     try:
         result = handle_reshare_post(
             req.post_cid,
@@ -360,7 +367,7 @@ def profile():
 # LIST FOLLOWERS (for share picker)
 # ---------------------------------------------------------
 @app.get("/followers")
-def api_list_followers(delegate=Depends(require_delegate)):
+def api_list_followers(delegate=Depends(require_owner)):
     """
     Returns user-level followers (deduplicated from devices),
     excluding the station's own UID.
@@ -391,6 +398,102 @@ def api_list_followers(delegate=Depends(require_delegate)):
     }
 
 
+# ---------------------------------------------------------
+# FOLLOWER APPROVAL (owner-only)
+#
+# Inbound follow requests land as "Pending" (unless dev auto-accept is on). The
+# owner reviews pending requests and approves them here; approval is the only
+# place a follower becomes "Allowed" and gets content + social-graph envelopes.
+# ---------------------------------------------------------
+@app.get("/followers/pending")
+def api_list_pending_followers(owner=Depends(require_owner)):
+    """Return follower devices awaiting the owner's approval."""
+    self_uid = get_identity().uid
+    pending = [p for p in list_pending_followers() if p.get("uid") != self_uid]
+    return {"status": "ok", "pending": pending}
+
+
+class ApproveFollowerRequest(BaseModel):
+    uid: str
+    device_uid: str | None = None  # omit to approve all devices for this uid
+
+
+@app.post("/followers/approve")
+def api_approve_follower(req: ApproveFollowerRequest, owner=Depends(require_owner)):
+    self_uid = get_identity().uid
+    if req.uid == self_uid:
+        raise HTTPException(status_code=400, detail="cannot approve the station's own uid")
+
+    updated = approve_follower(req.uid, req.device_uid)
+    if updated == 0:
+        raise HTTPException(status_code=404, detail="no matching follower to approve")
+
+    # Now that the follower is Allowed, grant access: rewrap "all" post envelopes
+    # and rebuild the encrypted social graph so they receive their envelopes.
+    ident = get_identity()
+    rewrap = None
+    try:
+        rewrap = rewrap_all_posts(ident.mlkem_sk)
+    except Exception as e:
+        rewrap = {"error": str(e)}
+    cids = rebuild_graphs_and_envelopes()
+
+    return {
+        "status": "ok",
+        "action": "approve_follower",
+        "uid": req.uid,
+        "device_uid": req.device_uid,
+        "devices_approved": updated,
+        "rewrap": rewrap,
+        "updated_graph": cids,
+    }
+
+
+class RemoveFollowerRequest(BaseModel):
+    uid: str
+    device_uid: str | None = None  # omit to remove every device for this uid
+
+
+@app.post("/followers/remove")
+def api_remove_follower(req: RemoveFollowerRequest, owner=Depends(require_owner)):
+    """
+    Reject a pending follow request or revoke an existing follower (owner-only).
+
+    Removing an Allowed follower re-wraps content envelopes and rebuilds the
+    encrypted social graph so the published state no longer includes them.
+    (Already-published content they previously had keys for cannot be recalled —
+    IPFS has no delete — but they receive no new envelopes going forward.)
+    """
+    self_uid = get_identity().uid
+    if req.uid == self_uid:
+        raise HTTPException(status_code=400, detail="cannot remove the station's own identity")
+
+    result = remove_follower(req.uid, req.device_uid)
+    if result["removed"] == 0:
+        raise HTTPException(status_code=404, detail="no matching follower to remove")
+
+    rewrap = None
+    cids = None
+    if result["removed_allowed"]:
+        ident = get_identity()
+        try:
+            rewrap = rewrap_all_posts(ident.mlkem_sk)
+        except Exception as e:
+            rewrap = {"error": str(e)}
+        cids = rebuild_graphs_and_envelopes()
+
+    return {
+        "status": "ok",
+        "action": "remove_follower",
+        "uid": req.uid,
+        "device_uid": req.device_uid,
+        "removed": result["removed"],
+        "removed_allowed": result["removed_allowed"],
+        "rewrap": rewrap,
+        "updated_graph": cids,
+    }
+
+
 class FollowRequest(BaseModel):
     uid: str
     endpoint: str
@@ -403,7 +506,7 @@ class FollowRequest(BaseModel):
 # FOLLOW / UNFOLLOW
 # ---------------------------------------------------------
 @app.post("/follow")
-def api_follow(req: FollowRequest, auth_ctx=Depends(require_delegate)):
+def api_follow(req: FollowRequest, auth_ctx=Depends(require_owner)):
     follow_user(
         req.uid,
         mlkem_public_key=req.mlkem_public_key,
@@ -435,7 +538,7 @@ class UnfollowRequest(BaseModel):
 
 
 @app.post("/unfollow")
-def api_unfollow(req: UnfollowRequest, auth_ctx=Depends(require_delegate)):
+def api_unfollow(req: UnfollowRequest, auth_ctx=Depends(require_owner)):
     unfollow_user(req.uid)
 
     cids = rebuild_graphs_and_envelopes()
@@ -452,7 +555,12 @@ def api_unfollow(req: UnfollowRequest, auth_ctx=Depends(require_delegate)):
 
 @app.post("/delegate/start")
 def delegate_start(req: DelegateStart):
-    sess = create_pairing_session(req.device_uid, req.mlkem_public_key, req.mldsa_public_key)
+    try:
+        sess = create_pairing_session(req.device_uid, req.mlkem_public_key, req.mldsa_public_key)
+    except PairingThrottled as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     logger.info(f"Pairing session created: pairing_id={sess.pairing_id}")
     logger.info(f">>> PAIRING PIN: {sess.pin} <<< (expires in 5 minutes)")
     return {"status": "ok", "pairing_id": sess.pairing_id, "expires_in_seconds": 5 * 60}
@@ -460,7 +568,12 @@ def delegate_start(req: DelegateStart):
 
 @app.post("/delegate/confirm")
 def delegate_confirm(req: DelegateConfirm):
-    device_uid, device_mlkem_pk, device_mldsa_pk = confirm_pairing_session(req.pairing_id, req.pin)
+    try:
+        device_uid, device_mlkem_pk, device_mldsa_pk = confirm_pairing_session(req.pairing_id, req.pin)
+    except PairingThrottled as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     uid = get_identity().uid
 

@@ -21,6 +21,29 @@ MAX_DEVICES_PER_FOLLOWER = int(os.getenv("ORBIT_MAX_DEVICES_PER_FOLLOWER", "20")
 # If set to "0", disables expensive rewrap_all_posts on follow changes (handy in dev)
 AUTO_REWRAP_ON_FOLLOW_CHANGE = os.getenv("ORBIT_AUTO_REWRAP_ON_FOLLOW_CHANGE", "1") != "0"
 
+# ---------------------------------------------------------------------------
+# DEV-ONLY: auto-accept inbound follow requests.
+#
+# /inbox follow requests are UNAUTHENTICATED. When this flag is on, a follow
+# request is immediately promoted to "Allowed" and granted content envelopes for
+# every "all"-audience post — i.e. anyone who can reach the station can read your
+# "all" content with no approval. That is convenient while bootstrapping a dev
+# environment but is a full access-control bypass in production.
+#
+# Default OFF (fail-closed): follow requests are recorded as "Pending" and the
+# owner must approve them (POST /followers/approve) before any access is granted.
+# Set ORBIT_DEV_AUTO_ACCEPT_FOLLOWS=1 to restore the old auto-accept behavior.
+# ---------------------------------------------------------------------------
+DEV_AUTO_ACCEPT_FOLLOWS = os.getenv(
+    "ORBIT_DEV_AUTO_ACCEPT_FOLLOWS", "0"
+).strip().lower() in ("1", "true", "yes", "on")
+
+if DEV_AUTO_ACCEPT_FOLLOWS:
+    logger.warning(
+        "ORBIT_DEV_AUTO_ACCEPT_FOLLOWS is ON — inbound follow requests are "
+        "auto-approved and granted content access. Do NOT use this in production."
+    )
+
 
 def _is_hex(s: str) -> bool:
     try:
@@ -79,6 +102,11 @@ def process_inbox_message(mlkem_sk: bytes, message: dict):
 
         changed = False
 
+        # Approval state for newly-registered devices. In production (default)
+        # follow requests are recorded as "Pending" and grant no access until the
+        # owner approves them; the dev flag restores immediate auto-accept.
+        new_allowed = "Allowed" if DEV_AUTO_ACCEPT_FOLLOWS else "Pending"
+
         # IPNS peer ID (permanent discovery address) if provided
         follower_ipns_id = message.get("ipns_id")
 
@@ -109,22 +137,35 @@ def process_inbox_message(mlkem_sk: bytes, message: dict):
                 if mldsa_pk is not None and not _is_mldsa_pub(mldsa_pk):
                     return {"error": f"Bad mldsa_public_key for device {device_uid} (expected {pqcrypto.MLDSA_PUBLIC_HEX} hex chars)"}
 
-                is_new = device_uid not in existing
-                if is_new:
-                    if (len(existing) + new_additions) >= MAX_DEVICES_PER_FOLLOWER:
-                        return {"error": f"too many devices for follower (cap={MAX_DEVICES_PER_FOLLOWER})"}
-                    new_additions += 1
+                # Idempotent: an UNAUTHENTICATED request must never modify a
+                # device that is already registered. Otherwise anyone could
+                # rotate an Allowed follower's content key to their own (hijack)
+                # or flip approval state. Re-requests for known devices are
+                # no-ops; a real key rotation must go through owner re-approval.
+                if device_uid in existing:
+                    continue
 
-                # Trigger if new device OR rotated content key
-                if existing.get(device_uid) != mlkem_pk:
-                    changed = True
+                if (len(existing) + new_additions) >= MAX_DEVICES_PER_FOLLOWER:
+                    return {"error": f"too many devices for follower (cap={MAX_DEVICES_PER_FOLLOWER})"}
+                new_additions += 1
 
                 add_follower_device(
                     follower_uid, device_uid, mlkem_public_key=mlkem_pk,
                     mldsa_public_key=mldsa_pk, ipns_id=follower_ipns_id,
+                    allowed=new_allowed,
                 )
 
-            result = {"status": "follow_accepted_multi_device", "rewrap_triggered": changed}
+            # Only an actual grant of access (dev auto-accept) warrants a rewrap.
+            if DEV_AUTO_ACCEPT_FOLLOWS and new_additions > 0:
+                changed = True
+
+            result = {
+                "status": ("follow_accepted_multi_device" if DEV_AUTO_ACCEPT_FOLLOWS
+                           else "follow_request_pending_multi_device"),
+                "rewrap_triggered": changed,
+                "devices_added": new_additions,
+                "pending_approval": (0 if DEV_AUTO_ACCEPT_FOLLOWS else new_additions),
+            }
 
         # Case B: Legacy single-device follow request
         else:
@@ -136,21 +177,30 @@ def process_inbox_message(mlkem_sk: bytes, message: dict):
                 return {"error": f"follow_request mldsa_public_key must be {pqcrypto.MLDSA_PUBLIC_HEX} hex chars"}
 
             existing_devices = list_follower_devices(follower_uid)
+            existing_uids = {d.get("device_uid") for d in existing_devices}
+
+            # Idempotent for an already-registered device (see Case A rationale).
+            if follower_uid in existing_uids:
+                return {"status": "follow_request_already_registered", "uid": follower_uid}
 
             if len(existing_devices) >= MAX_DEVICES_PER_FOLLOWER:
                 return {"error": f"too many devices for follower (cap={MAX_DEVICES_PER_FOLLOWER})"}
 
-            # Trigger if first time we've seen them OR content key changed
-            if not existing_devices:
-                changed = True
-            elif all(d.get("mlkem_public_key") != mlkem_pk for d in existing_devices):
-                changed = True
-
             add_follower_device(
                 follower_uid, device_uid=follower_uid, mlkem_public_key=mlkem_pk,
                 mldsa_public_key=mldsa_pk, ipns_id=follower_ipns_id,
+                allowed=new_allowed,
             )
-            result = {"status": "follow_accepted", "rewrap_triggered": changed}
+
+            if DEV_AUTO_ACCEPT_FOLLOWS:
+                changed = True
+
+            result = {
+                "status": ("follow_accepted" if DEV_AUTO_ACCEPT_FOLLOWS
+                           else "follow_request_pending"),
+                "rewrap_triggered": changed,
+                "pending_approval": (0 if DEV_AUTO_ACCEPT_FOLLOWS else 1),
+            }
 
         # If we changed follower state, optionally rewrap follower envelopes for every post
         if changed and AUTO_REWRAP_ON_FOLLOW_CHANGE:

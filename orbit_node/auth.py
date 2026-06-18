@@ -3,7 +3,7 @@ import base64
 import hmac
 import logging
 import time
-from fastapi import Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request
 
 from orbit_node import pqcrypto
 from orbit_node.followers import list_follower_devices
@@ -133,3 +133,24 @@ async def require_delegate(
     _remember_nonce(x_orbit_uid, x_orbit_device, x_orbit_nonce, ts_i)
 
     return {"uid": x_orbit_uid, "device_uid": x_orbit_device}
+
+
+async def require_owner(ctx: dict = Depends(require_delegate)) -> dict:
+    """
+    Stricter dependency for station-management endpoints (create/delete/share a
+    post, follow/unfollow, list followers, rewrap, approve a follower).
+
+    require_delegate authenticates *any* Allowed device of *any* uid the station
+    knows about — including a follower's own delegate device. Those endpoints,
+    however, act on the station owner's data and must only be driven by the
+    owner's own delegate devices, whose authenticated uid equals the station uid.
+    Without this check a mere follower (or, with dev auto-accept, anyone) could
+    post as the owner, delete the owner's posts, or dump the follower list.
+    """
+    # Imported lazily to avoid any import-time coupling with identity loading.
+    from orbit_node.identity import get_identity
+
+    station_uid = get_identity().uid
+    if not station_uid or ctx.get("uid") != station_uid:
+        raise HTTPException(status_code=403, detail="owner-only endpoint")
+    return ctx

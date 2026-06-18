@@ -121,8 +121,23 @@ def _load_public_json(mlkem_pub_hex: str, mldsa_pub_hex: str) -> dict:
 
 
 def load_public_identity() -> dict:
-    """Used by profile.py — returns the public.json dict (bootstrapping if needed)."""
-    return get_identity().public_json
+    """
+    Return the *current* public.json from disk.
+
+    public.json is mutated on disk after the cached Identity is first loaded:
+    every new post rewrites ``manifest_pointer`` (manifest._update_public_json_
+    manifest_pointer), the Cloudflare monitor rewrites ``endpoint``, and graph
+    rebuilds rewrite the ``*_cid`` pointers. ``Identity.public_json`` is only a
+    startup snapshot, so reading it would make ``/profile`` hand clients a stale
+    manifest pointer (and endpoint). Re-read the file each call; fall back to the
+    cached snapshot only if the file is unreadable.
+    """
+    ident = get_identity()  # ensures the identity is bootstrapped + cached
+    try:
+        return json.loads(PUBLIC_JSON_PATH.read_text())
+    except Exception as e:
+        logger.warning("load_public_identity: falling back to cached public.json (%s)", e)
+        return ident.public_json
 
 
 def bootstrap_identity(password: str | None = None) -> Identity:

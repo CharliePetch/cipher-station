@@ -8,7 +8,23 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-BASE_DIR = Path(os.getenv("ORBIT_BASE_DIR", "./orbit_data"))
+# Anchor the data directory to the project itself (the folder containing
+# install.sh / run.py, i.e. the parent of this package) rather than to the
+# current working directory. This makes the station's data location stable no
+# matter where the process is launched from or what systemd sets as the cwd.
+#
+#   - ORBIT_BASE_DIR unset            -> <project>/orbit_data
+#   - ORBIT_BASE_DIR set (absolute)   -> used as-is
+#   - ORBIT_BASE_DIR set (relative)   -> resolved against <project>, not cwd
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+_base_dir_env = os.getenv("ORBIT_BASE_DIR")
+if _base_dir_env:
+    _base = Path(_base_dir_env).expanduser()
+    BASE_DIR = _base if _base.is_absolute() else (PROJECT_ROOT / _base).resolve()
+else:
+    BASE_DIR = PROJECT_ROOT / "orbit_data"
+
 KEYS_DIR = BASE_DIR / "keys"
 DB_PATH = BASE_DIR / "orbit.db"
 PUBLIC_JSON_PATH = BASE_DIR / "public.json"
