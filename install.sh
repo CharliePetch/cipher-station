@@ -26,6 +26,24 @@ KUBO_VERSION="0.28.0"
 # -----------------------------------------------------------
 CIPHER_DATA_ROOT="${CIPHER_DATA_ROOT:-}"
 CIPHER_STORAGE_MAX="${CIPHER_STORAGE_MAX:-}"
+
+# -----------------------------------------------------------
+# Identity encryption at rest (opt-in).
+#
+#   CIPHER_PASSWORD_SEED unset/empty -> unchanged: key files are written in the
+#                                       clear, exactly as every previous install.
+#   CIPHER_PASSWORD_SEED=<value>     -> written into .env as CIPHER_PASSWORD
+#                                       BEFORE identity bootstrap, so mlkem.bin /
+#                                       mldsa.bin are Argon2i+SecretBox ciphertext
+#                                       from birth.
+#
+# Deliberately NOT named CIPHER_PASSWORD: an operator who happens to export
+# CIPHER_PASSWORD in their own shell must not silently change how this installer
+# writes keys, and the name must not be confusable with the value the installer
+# writes INTO .env. Validated (and reconciled against any pre-existing keys)
+# further down, once the log helpers and the venv exist.
+# -----------------------------------------------------------
+CIPHER_PASSWORD_SEED="${CIPHER_PASSWORD_SEED:-}"
 if [ -n "$CIPHER_DATA_ROOT" ]; then
     IPFS_REPO="$CIPHER_DATA_ROOT/ipfs"
     STATION_DATA="$CIPHER_DATA_ROOT/station"
@@ -99,6 +117,42 @@ if [ -n "$CIPHER_DATA_ROOT" ]; then
 fi
 
 # -----------------------------------------------------------
+# Validate CIPHER_PASSWORD_SEED before anything is written.
+#
+# There is NO rotation path. identity.py encrypts the key bundle with the
+# password it is given at bootstrap; loading later with a different password (or
+# none) raises CryptoError/ValueError and the station never starts again. So the
+# value has to be exactly right the first time — which means systemd's
+# EnvironmentFile parser and python-dotenv must agree on it byte-for-byte, since
+# the service reads .env through the former and the bootstrap step below reads it
+# through the latter.
+#
+# Two classes of value are rejected here rather than discovered as a dead station:
+#   - non-printable bytes (CR/LF/TAB): a KEY=value line cannot carry them at all;
+#   - quotes and backslashes: the value is emitted SINGLE-QUOTED in .env — that
+#     is what stops python-dotenv from treating " #" as an inline comment and
+#     from stripping trailing spaces — and an embedded quote or backslash breaks
+#     that quoting differently in each parser.
+# -----------------------------------------------------------
+if [ -n "$CIPHER_PASSWORD_SEED" ]; then
+    case "$CIPHER_PASSWORD_SEED" in
+        *[![:print:]]*)
+            err "CIPHER_PASSWORD_SEED contains a non-printable character (newline/tab/CR?)."
+            err "A .env KEY=value line cannot carry one — use printable characters only."
+            exit 1 ;;
+    esac
+    case "$CIPHER_PASSWORD_SEED" in
+        *\'*|*\"*|*\\*)
+            err "CIPHER_PASSWORD_SEED must not contain a quote or a backslash ( ' \" \\ )."
+            err "It is stored single-quoted in .env; an embedded quote would make systemd"
+            err "and python-dotenv read DIFFERENT passwords, and the keys decrypt with"
+            err "neither. Regenerate the seed without those characters."
+            exit 1 ;;
+    esac
+    info "Identity keys will be encrypted at rest (CIPHER_PASSWORD_SEED supplied)."
+fi
+
+# -----------------------------------------------------------
 # Distro support: detect the package manager + require systemd.
 # Works on Debian/Ubuntu (apt), Fedora/RHEL (dnf), Arch (pacman), openSUSE (zypper).
 # -----------------------------------------------------------
@@ -163,19 +217,65 @@ configure_firewall() {
             sudo ufw allow 22/tcp >/dev/null 2>&1 || true
         fi
         sudo ufw allow "${CIPHER_PORT}/tcp" comment "Cipher Station" 2>/dev/null || true
+        # libp2p swarm. Without this the station is a write-only node: it can
+        # still sign and publish IPNS records, but nothing can DIAL it to fetch
+        # the blocks those records point at, so every follower and every public
+        # gateway resolves the name and then stalls ("504 no providers found").
+        # The whole content-sharing premise fails silently — the install looks
+        # perfect and the station serves nobody.
+        # UDP as well as TCP: kubo listens on /udp/4001/quic-v1 by default and
+        # QUIC is what most modern peers try first. Opening only TCP still
+        # works, but degrades every dial to the slow path and blocks peers on
+        # UDP-only paths outright, for no security gain — it is the same
+        # service on the same port.
+        sudo ufw allow 4001/tcp comment "IPFS swarm" 2>/dev/null || true
+        sudo ufw allow 4001/udp comment "IPFS swarm (QUIC)" 2>/dev/null || true
         sudo ufw --force enable 2>/dev/null || true
-        ok "Firewall (ufw): SSH + ${CIPHER_PORT}/tcp allowed"
+        ok "Firewall (ufw): SSH + ${CIPHER_PORT}/tcp + 4001/tcp+udp (IPFS swarm) allowed"
     elif command -v firewall-cmd >/dev/null 2>&1; then
         # Same reasoning as above. firewalld's default zone usually permits ssh
         # already, but assert it rather than assume — a hardened base image may
         # not, and the failure mode is identical.
         sudo firewall-cmd --permanent --add-service=ssh >/dev/null 2>&1 || true
         sudo firewall-cmd --permanent --add-port="${CIPHER_PORT}/tcp" >/dev/null 2>&1 || true
+        # libp2p swarm — see the ufw branch above for why a closed 4001 makes the
+        # station publishable but unreadable.
+        sudo firewall-cmd --permanent --add-port=4001/tcp >/dev/null 2>&1 || true
+        sudo firewall-cmd --permanent --add-port=4001/udp >/dev/null 2>&1 || true
         sudo firewall-cmd --reload >/dev/null 2>&1 || true
-        ok "Firewall (firewalld): SSH + ${CIPHER_PORT}/tcp allowed"
+        ok "Firewall (firewalld): SSH + ${CIPHER_PORT}/tcp + 4001/tcp+udp (IPFS swarm) allowed"
     else
-        warn "No ufw/firewalld detected — skipping firewall setup. Open ${CIPHER_PORT}/tcp yourself if you run a firewall."
+        warn "No ufw/firewalld detected — skipping firewall setup. If you run a firewall, open"
+        warn "  ${CIPHER_PORT}/tcp   (Cipher Station)"
+        warn "  4001/tcp + 4001/udp  (IPFS swarm — without it nobody can fetch what you publish)"
     fi
+}
+
+# Read a single value out of .env the way a consumer would: first match wins,
+# one layer of surrounding quotes stripped (systemd EnvironmentFile and
+# python-dotenv both accept quoted values). Empty output means "absent or blank".
+# Used only by the CIPHER_PASSWORD_SEED reconciliation below.
+_env_value() {
+    [ -f "$CIPHER_DIR/.env" ] || return 0
+    _v="$(grep -m1 "^$1=" "$CIPHER_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
+    case "$_v" in
+        \"*\") _v="${_v#\"}"; _v="${_v%\"}" ;;
+        \'*\') _v="${_v#\'}"; _v="${_v%\'}" ;;
+    esac
+    printf '%s' "$_v"
+}
+
+# Resolve the station's keys directory EXACTLY as the station resolves it —
+# config.py's rule is CIPHER_BASE_DIR from the real environment first, .env
+# second, project-relative default third. Guessing it in shell would be wrong for
+# any box whose .env names a location this run did not choose. Requires the venv,
+# so it is only ever called after step 5.
+_resolve_keys_dir() {
+    "$CIPHER_DIR/.venv/bin/python" -c "
+import sys; sys.path.insert(0, '$CIPHER_DIR')
+from cipher_station.config import KEYS_DIR
+print(KEYS_DIR)
+" 2>/dev/null || true
 }
 
 # -----------------------------------------------------------
@@ -377,8 +477,27 @@ if [ -n "$IPFS_NEEDS_INIT" ]; then
     # Truthful on both paths now: the data-root path pinned IPFS_PATH itself, and
     # the legacy path only reaches here when the caller's environment resolves to
     # this very repo.
-    info "Initializing IPFS with lowpower profile ($IPFS_REPO)..."
-    ipfs init --profile=lowpower
+    # PROFILE CHOICE.
+    #
+    # Self-host (CIPHER_DATA_ROOT unset) keeps lowpower, unchanged from every
+    # previous install: it is why lowpower was picked, and a Pi owner who wants
+    # the smaller power/connection budget keeps exactly what they had.
+    #
+    # A hosted box gets 'server' instead, because lowpower is not merely
+    # "smaller" — it sets Routing.Type=autoclient, disables the AutoNAT service
+    # and pins Reprovider.Interval=0. A zero reprovide interval means the node
+    # NEVER announces provider records for its own blocks, so the station
+    # publishes IPNS records pointing at content the DHT has no provider for:
+    # gateways answer "504 no providers found" and followers see an empty
+    # station. On a machine whose entire job is serving content that is not a
+    # trade-off, it is a misconfiguration. 'server' is kubo's own profile for a
+    # box with a public IP: stock routing and reprovide behaviour, minus
+    # local-network (mDNS) discovery, which on a cloud LAN is noise at best and
+    # neighbour-probing at worst.
+    IPFS_PROFILE="lowpower"
+    if [ -n "$CIPHER_DATA_ROOT" ]; then IPFS_PROFILE="server"; fi
+    info "Initializing IPFS with ${IPFS_PROFILE} profile ($IPFS_REPO)..."
+    ipfs init --profile="$IPFS_PROFILE"
 
     # Bind API to localhost only (security)
     ipfs config Addresses.API /ip4/127.0.0.1/tcp/5001
@@ -399,6 +518,33 @@ fi
 if [ -n "$CIPHER_STORAGE_MAX" ]; then
     IPFS_PATH="$IPFS_REPO" ipfs config Datastore.StorageMax "$CIPHER_STORAGE_MAX"
     ok "IPFS datastore cap: $CIPHER_STORAGE_MAX ($IPFS_REPO)"
+fi
+
+# Provider announcements — hosted only, re-asserted on EVERY run (same reasoning
+# as the datastore cap above: a re-run is how a fix reaches a box that already
+# exists). kubo profiles apply at `ipfs init` and never again, so a hosted box
+# installed by an earlier version of this installer is still carrying lowpower's
+# Reprovider.Interval=0 and is invisible to the DHT no matter how many times the
+# installer is re-run. The 'server' profile above only fixes brand-new repos.
+#
+#   Reprovider.Interval=22h  re-announce provider records for our own blocks.
+#                            0 (lowpower) means "never announce", which is the
+#                            single setting that decides whether anything this
+#                            station publishes can be fetched by anyone.
+#   Routing.Type=auto        full DHT participation once the node sees itself as
+#                            publicly reachable. 'autoclient' can read the DHT
+#                            and can still provide, but never serves queries
+#                            back — free-riding from a box on a public IP with
+#                            4001 open, which is exactly the node the network
+#                            wants as a server.
+#
+# Deliberately NOT applied on a self-host/Pi install: someone running lowpower
+# chose it for the power and connection budget, and this installer does not get
+# to overrule that on their hardware.
+if [ -n "$CIPHER_DATA_ROOT" ]; then
+    IPFS_PATH="$IPFS_REPO" ipfs config Reprovider.Interval 22h
+    IPFS_PATH="$IPFS_REPO" ipfs config Routing.Type auto
+    ok "IPFS provider announcements enabled (reprovide 22h, routing auto)"
 fi
 
 # -----------------------------------------------------------
@@ -491,13 +637,66 @@ fi
 #             naming a path the installer never creates only breaks `create`.
 ENV_BACKUP_DEST=""
 
+# -----------------------------------------------------------
+# CIPHER_PASSWORD_SEED reconciliation. Runs BEFORE .env is written and before the
+# identity bootstrap, because those two must agree and there is no second chance:
+# adding a password to key files that already exist in the clear is not
+# implemented anywhere, and the wrong password is indistinguishable from a
+# corrupt key file at startup.
+#
+# Only two states are safe:
+#   no key files yet   -> nothing is encrypted, write the seed into .env and let
+#                         the bootstrap below create encrypted keys.
+#   keys already exist -> touch NOTHING. Accept the run only if .env already
+#                         carries this exact seed (an ordinary hosted re-run, or
+#                         a --restore whose archive brought back the matching
+#                         .env). Anything else is a mismatch we must refuse
+#                         loudly rather than write a password the keys will not
+#                         open with.
+# No-op in every respect when CIPHER_PASSWORD_SEED is unset.
+# -----------------------------------------------------------
+SEED_APPLY=""
+if [ -n "$CIPHER_PASSWORD_SEED" ]; then
+    _keys_dir="$(_resolve_keys_dir)"
+    if [ -n "$_keys_dir" ] && { [ -f "$_keys_dir/mlkem.bin" ] || [ -f "$_keys_dir/mldsa.bin" ]; }; then
+        if [ "$(_env_value CIPHER_PASSWORD)" = "$CIPHER_PASSWORD_SEED" ]; then
+            ok "Identity keys already exist and .env already carries this password — left untouched."
+        else
+            err "CIPHER_PASSWORD_SEED was supplied, but this station already has key files:"
+            err "  $_keys_dir"
+            err "and its .env does not carry that password."
+            err ""
+            err "Refusing to continue. Writing the seed now would not encrypt those keys —"
+            err "there is no rotation path — it would only guarantee the station fails to"
+            err "start, because identity.py would try to decrypt them with a password they"
+            err "were never encrypted under."
+            err ""
+            err "Nothing has been modified. Pick one:"
+            err "  - Keep this station as it is: re-run without CIPHER_PASSWORD_SEED."
+            err "  - These keys ARE encrypted, with a different password: re-run with"
+            err "    CIPHER_PASSWORD_SEED set to that password."
+            err "  - You want an encrypted station and these keys are disposable: provision"
+            err "    a new one (fresh data root / fresh keys) with the seed set."
+            exit 1
+        fi
+    else
+        SEED_APPLY=1
+    fi
+    unset _keys_dir
+fi
+
 if [ ! -f "$CIPHER_DIR/.env" ]; then
     cat > "$CIPHER_DIR/.env" <<'ENVFILE'
 # Cipher Station Configuration
 
 # --- Identity ---
-# Password for encrypting the station private key (leave empty for no encryption)
-CIPHER_PASSWORD=
+# Password for encrypting the station private keys at rest (leave empty for no
+# encryption). Set at install time from CIPHER_PASSWORD_SEED.
+#
+# WARNING: there is no rotation path. Once mlkem.bin/mldsa.bin have been written,
+# changing this value (or clearing it) makes them undecryptable and the station
+# will not start. Blank here means the key files are plaintext on disk.
+CIPHER_PASSWORD=__CIPHER_PASSWORD_SEED__
 
 # --- Post-quantum backend ---
 # auto   = use the constant-time liboqs backend if installed, else pure-Python (default)
@@ -576,7 +775,31 @@ CIPHER_BACKUP_DEST=__CIPHER_BACKUP_DEST__
 CIPHER_BASE_DIR=__CIPHER_STATION_DATA__
 ENVFILE
     sed -i "s#__CIPHER_STATION_DATA__#${ENV_BASE_DIR}#g; s#__CIPHER_BACKUP_DEST__#${ENV_BACKUP_DEST}#g" "$CIPHER_DIR/.env"
-    ok "Created .env with defaults (edit as needed)"
+    # The password token gets its OWN substitution, kept separate from the two
+    # path tokens above so the no-seed case stays byte-for-byte identical to
+    # every previous install: the token collapses to nothing and the line is the
+    # familiar `CIPHER_PASSWORD=`.
+    if [ -n "$SEED_APPLY" ]; then
+        # Escaped for the sed REPLACEMENT side, where '&' means "the whole match"
+        # and '#' is our delimiter. The validation at the top already rejected
+        # backslashes and quotes, so this is belt-and-braces — but a secret is
+        # exactly the wrong thing to feed a substitution unescaped.
+        _seed_sed="$(printf '%s' "$CIPHER_PASSWORD_SEED" | sed -e 's/[&\\#]/\\&/g')"
+        # Single-quoted on purpose: python-dotenv treats " #" in an UNQUOTED
+        # value as an inline comment and strips trailing whitespace, so an
+        # unquoted password could reach systemd and the bootstrap as two
+        # different strings — which, with no rotation path, is an unrecoverable
+        # station. Quoting is understood by both readers.
+        sed -i "s#__CIPHER_PASSWORD_SEED__#'${_seed_sed}'#" "$CIPHER_DIR/.env"
+        unset _seed_sed
+        # .env now holds the key-encryption password; the default umask would
+        # leave it world-readable next to the keys it protects.
+        chmod 600 "$CIPHER_DIR/.env"
+        ok "Created .env (identity password set from CIPHER_PASSWORD_SEED, mode 600)"
+    else
+        sed -i "s#__CIPHER_PASSWORD_SEED__##" "$CIPHER_DIR/.env"
+        ok "Created .env with defaults (edit as needed)"
+    fi
 else
     ok ".env already exists"
     # An existing .env is never rewritten, so these are two INDEPENDENT checks
@@ -643,6 +866,27 @@ else
         unset _bk_on_data_root
     fi
     unset _bk_dest
+
+    # (c) CIPHER_PASSWORD — only when a seed was supplied AND the reconciliation
+    # above proved no key files exist yet. An existing .env is never rewritten
+    # wholesale, so without this the seed would be silently dropped on any box
+    # that already has a .env: the control plane would hand the customer a
+    # passphrase for keys that were then written in the clear. Editing the line
+    # in place is safe here precisely because nothing is encrypted yet.
+    if [ -n "$SEED_APPLY" ]; then
+        _seed_sed="$(printf '%s' "$CIPHER_PASSWORD_SEED" | sed -e 's/[&\\#]/\\&/g')"
+        if grep -q '^CIPHER_PASSWORD=' "$CIPHER_DIR/.env"; then
+            sed -i "s#^CIPHER_PASSWORD=.*#CIPHER_PASSWORD='${_seed_sed}'#" "$CIPHER_DIR/.env"
+        else
+            # Hand-trimmed .env with the key removed entirely — append rather
+            # than let the substitution quietly match nothing.
+            printf "\n# Set at install time from CIPHER_PASSWORD_SEED (no rotation path).\nCIPHER_PASSWORD='%s'\n" \
+                "$CIPHER_PASSWORD_SEED" >> "$CIPHER_DIR/.env"
+        fi
+        unset _seed_sed
+        chmod 600 "$CIPHER_DIR/.env"
+        ok "Existing .env: CIPHER_PASSWORD set from CIPHER_PASSWORD_SEED (no keys existed yet, mode 600)"
+    fi
 fi
 
 # Enable Cloudflare tunnel for fresh installs
@@ -658,14 +902,86 @@ if [ -n "$RESTORED" ]; then
     ok "Identity restored from backup (skipping fresh bootstrap)"
 else
     info "Bootstrapping identity..."
+    # The password is read from .env EXPLICITLY, not from the ambient environment
+    # and not from config.CIPHER_PASSWORD.
+    #
+    #   - Passing nothing (the old `load_identity()`) meant the key files were
+    #     ALWAYS written in the clear, even on a box whose .env set
+    #     CIPHER_PASSWORD — and then the service, which does honour .env, could
+    #     not open them. That is the documented "leave empty for no encryption"
+    #     knob silently not working.
+    #   - config.CIPHER_PASSWORD is os.getenv first, .env second (load_dotenv
+    #     does not override real env vars), so an operator with CIPHER_PASSWORD
+    #     exported in their own shell would encrypt the keys with a value systemd
+    #     never sees — an unrecoverable station from one stale export.
+    #
+    # .env is the single source of truth because .env is what the service reads
+    # (EnvironmentFile=), and it always exists by this point: step 6 either
+    # created it or found it.
     "$CIPHER_DIR/.venv/bin/python" -c "
 import sys; sys.path.insert(0, '$CIPHER_DIR')
+from dotenv import dotenv_values
 from cipher_station.identity import load_identity
-load_identity()
-print('Identity ready')
+pw = dotenv_values('$CIPHER_DIR/.env').get('CIPHER_PASSWORD') or None
+
+# Passing the password is itself a bug fix: this call used to be a bare
+# load_identity(), which defaults password=None, so CIPHER_PASSWORD was
+# silently ignored and keys were written in the clear no matter what .env
+# said. But that old bug MADE a population of boxes whose .env names a
+# password while the key files on disk are plaintext — and for them a
+# straight load_identity(password=pw) raises CryptoError and aborts the
+# installer. Turning a silent no-op into a hard failure on re-run would be
+# its own regression, so mismatches are reported, not raised.
+#
+# There is no rotation path (bootstrap_identity is the only writer, and it
+# only runs when BOTH key files are absent), so neither branch can repair
+# the mismatch — the honest move is to say so plainly and carry on with
+# the keys that actually exist.
+try:
+    load_identity(password=pw)
+    print('Identity ready — key files ENCRYPTED at rest' if pw
+          else 'Identity ready — key files stored unencrypted (CIPHER_PASSWORD empty)')
+except Exception as first_error:
+    fallback = None if pw else ''
+    try:
+        load_identity(password=fallback or None)
+    except Exception:
+        raise first_error
+    if pw:
+        print('WARNING: .env sets CIPHER_PASSWORD, but the existing key files are '
+              'stored UNENCRYPTED. They predate the password (or predate the fix '
+              'that made it take effect). Existing keys cannot be encrypted in '
+              'place — there is no rotation path. To get encrypted keys you must '
+              'start a NEW identity, which changes your station address and '
+              'orphans anything already published.')
+    else:
+        print('WARNING: the key files are ENCRYPTED but .env sets no '
+              'CIPHER_PASSWORD, so the station will not be able to read them at '
+              'startup. Restore the original CIPHER_PASSWORD value to .env.')
 "
     ok "Identity bootstrapped"
 fi
+
+# Lock down the key material. identity.py writes mlkem.bin/mldsa.bin with
+# `path.write_bytes()`, i.e. the process umask — 0644 on every distro this
+# installer supports, so the station's ML-DSA signing key and ML-KEM decryption
+# key are world-readable by default. That is wrong whether or not
+# CIPHER_PASSWORD is set (unencrypted: outright key disclosure to any local user;
+# encrypted: a free offline target for the Argon2i password), so it is fixed
+# unconditionally rather than under a guard.
+#
+# Applied after BOTH branches on purpose: --restore lays the same files back down
+# from a tar archive, carrying whatever modes the archive recorded.
+_keys_dir="$(_resolve_keys_dir)"
+if [ -n "$_keys_dir" ] && [ -d "$_keys_dir" ]; then
+    chmod 700 "$_keys_dir" 2>/dev/null || true
+    find "$_keys_dir" -maxdepth 1 -type f -exec chmod 600 {} + 2>/dev/null || true
+    ok "Key material locked down: 700 $_keys_dir, 600 on the key files"
+else
+    warn "Could not resolve the keys directory — check permissions on it by hand"
+    warn "(the key files should be 600, the directory 700)."
+fi
+unset _keys_dir
 
 # -----------------------------------------------------------
 # 8. Systemd: IPFS service
@@ -845,18 +1161,60 @@ if systemctl is-enabled cloudflared-tunnel.service &>/dev/null; then
 fi
 echo ""
 
-# Show IPFS peer ID (the station's permanent address). IPFS_PATH is pinned to
-# the repo the SERVICES use, which is what this banner claims to report — a bare
-# `ipfs id` follows the caller's ambient IPFS_PATH and would print the identity
-# of some other repo. Identical to the old bare call whenever IPFS_PATH is unset
-# (kubo's own default is $HOME/.ipfs) or already pinned by the data-root path.
-PEER_ID=$(IPFS_PATH="$IPFS_REPO" ipfs id -f='<id>' 2>/dev/null || echo "unknown")
-info "Your IPFS Peer ID (permanent station address):"
-echo "  $PEER_ID"
+# The station's IPNS name, in base36 CIDv1 ("k51…") form.
+#
+# NOT `ipfs id -f='<id>'`: that returns the base58 peer id ("12D3KooW…"), which
+# is not a valid DNS label, so subdomain gateways reject it before they even look
+# for the record — https://ipfs.io/ipns/12D3KooW… is an immediate 500, not a slow
+# lookup. cipher_station/ipfs_client.py's ipfs_self_ipns_name() already returns
+# the base36 form for exactly this reason; this is the kubo-CLI equivalent, used
+# here rather than shelling into the venv because it must work regardless of the
+# Python environment's state at the end of an install.
+#
+# `ipfs key list -l --ipns-base=base36` prints "<id> <name>" per key; 'self' is
+# the node's own key, and its id in this encoding IS the IPNS name. base36 has
+# been kubo's default --ipns-base since 0.9 (0.28 here), but it is passed
+# explicitly so neither a stale config nor a future default change can silently
+# put a base58 id back in this banner. IPFS_PATH is pinned to the repo the
+# SERVICES use — a bare call follows the caller's ambient IPFS_PATH and would
+# report some other repo's identity.
+IPNS_NAME="$(IPFS_PATH="$IPFS_REPO" ipfs key list -l --ipns-base=base36 2>/dev/null \
+             | awk '$2 == "self" { print $1; exit }' || true)"
+STATION_HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+[ -n "$STATION_HOST" ] || STATION_HOST="$(hostname 2>/dev/null || true)"
+[ -n "$STATION_HOST" ] || STATION_HOST="localhost"
+
+info "Your station's IPNS name (permanent, machine-readable address):"
+if [ -n "$IPNS_NAME" ]; then
+    echo "  $IPNS_NAME"
+else
+    echo "  (could not read it — retry with:"
+    echo "     IPFS_PATH=$IPFS_REPO ipfs key list -l --ipns-base=base36)"
+fi
 echo ""
-info "Followers can discover your station via IPNS:"
-echo "  https://ipfs.io/ipns/${PEER_ID}"
+echo "  This is what CLIENTS resolve. It points at public.json — a raw JSON"
+echo "  document of public keys and content pointers. It is not a page: opening"
+echo "  it in a browser shows JSON, if it shows anything at all."
+echo "  On a brand-new station the record is published within a minute or two of"
+echo "  startup, but what it points at is nearly empty (no posts, manifest_pointer"
+echo "  null) until you publish something."
 echo ""
+info "Your profile — served live by the station itself, not via IPFS:"
+echo "  https://${STATION_HOST}:${CIPHER_PORT}/profile"
+echo ""
+
+# State the key-at-rest situation from the file the SERVICE reads, and say
+# plainly that it is final. The old banner advised "Edit .env to set
+# CIPHER_PASSWORD" as step 1 — by the time anyone reads it the keys already
+# exist, so following that advice encrypts nothing and stops the station from
+# starting (identity.py tries to decrypt plaintext bundles and raises).
+if [ -n "$(_env_value CIPHER_PASSWORD)" ]; then
+    KEYS_AT_REST="ENCRYPTED at rest"
+    KEYS_AT_REST_NOTE="Keep that password safe — without it the station cannot be restored."
+else
+    KEYS_AT_REST="stored UNENCRYPTED (CIPHER_PASSWORD is empty in .env)"
+    KEYS_AT_REST_NOTE="Setting it now would NOT encrypt them; there is no rotation path. Encryption at rest is chosen at install time via CIPHER_PASSWORD_SEED."
+fi
 
 info "Backup & restore (protects against microSD failure):"
 if [ -n "$CIPHER_DATA_ROOT" ]; then
@@ -895,9 +1253,12 @@ if systemctl is-enabled cloudflared-tunnel.service &>/dev/null; then
     echo "  sudo systemctl restart cipherstation             # restart"
     echo ""
     info "Next steps:"
-    echo "  1. Edit .env to set CIPHER_PASSWORD"
-    echo "  2. Your station is publicly reachable via Cloudflare tunnel (no port forwarding needed!)"
-    echo "  3. Share your Peer ID with followers — they can always find you via IPNS"
+    echo "  1. Identity keys are ${KEYS_AT_REST}."
+    echo "     ${KEYS_AT_REST_NOTE}"
+    echo "  2. The station's HTTP port is publicly reachable via the Cloudflare tunnel"
+    echo "     (no port forwarding needed). IPFS content still travels over 4001 —"
+    echo "     forward it on your router if you want peers to fetch from you directly."
+    echo "  3. Share your IPNS name (above) with followers — clients resolve it to find you"
     echo "  4. Connect your Cipher Station client app"
 else
     info "Access your station:"
@@ -909,8 +1270,11 @@ else
     echo "  sudo systemctl restart cipherstation    # restart"
     echo ""
     info "Next steps:"
-    echo "  1. Edit .env to set CIPHER_PASSWORD and other config"
-    echo "  2. Set up port forwarding on your router for port ${CIPHER_PORT}"
+    echo "  1. Identity keys are ${KEYS_AT_REST}."
+    echo "     ${KEYS_AT_REST_NOTE}"
+    echo "  2. Forward these ports on your router:"
+    echo "       ${CIPHER_PORT}/tcp            so clients can reach the station"
+    echo "       4001/tcp + 4001/udp    so IPFS peers can fetch what you publish"
     echo "  3. Connect your Cipher Station client app"
 fi
 echo ""
