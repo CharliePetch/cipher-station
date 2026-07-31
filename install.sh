@@ -146,13 +146,33 @@ install_system_deps() {
 # Open the Cipher Station port with whatever firewall the distro ships (best-effort).
 configure_firewall() {
     if command -v ufw >/dev/null 2>&1; then
+        # SSH MUST be allowed before ufw is enabled. ufw's default incoming
+        # policy is deny, so enabling it with only the station port open
+        # black-holes port 22 — and that is not a theoretical footgun:
+        #   - on a remote/cloud box it permanently locks the operator out of
+        #     the machine, defeating the whole point of installing an operator
+        #     SSH key to debug a failed install;
+        #   - on a Pi being set up over SSH, the current session survives via
+        #     conntrack but every future connection is dropped, so the owner
+        #     loses their own hardware.
+        # Prefer the OpenSSH app profile (it tracks a non-standard Port from
+        # sshd_config); fall back to 22/tcp where the profile isn't registered.
+        if sudo ufw app list 2>/dev/null | grep -q "OpenSSH"; then
+            sudo ufw allow OpenSSH >/dev/null 2>&1 || true
+        else
+            sudo ufw allow 22/tcp >/dev/null 2>&1 || true
+        fi
         sudo ufw allow "${CIPHER_PORT}/tcp" comment "Cipher Station" 2>/dev/null || true
         sudo ufw --force enable 2>/dev/null || true
-        ok "Firewall (ufw): ${CIPHER_PORT}/tcp allowed"
+        ok "Firewall (ufw): SSH + ${CIPHER_PORT}/tcp allowed"
     elif command -v firewall-cmd >/dev/null 2>&1; then
+        # Same reasoning as above. firewalld's default zone usually permits ssh
+        # already, but assert it rather than assume — a hardened base image may
+        # not, and the failure mode is identical.
+        sudo firewall-cmd --permanent --add-service=ssh >/dev/null 2>&1 || true
         sudo firewall-cmd --permanent --add-port="${CIPHER_PORT}/tcp" >/dev/null 2>&1 || true
         sudo firewall-cmd --reload >/dev/null 2>&1 || true
-        ok "Firewall (firewalld): ${CIPHER_PORT}/tcp allowed"
+        ok "Firewall (firewalld): SSH + ${CIPHER_PORT}/tcp allowed"
     else
         warn "No ufw/firewalld detected — skipping firewall setup. Open ${CIPHER_PORT}/tcp yourself if you run a firewall."
     fi
@@ -863,16 +883,16 @@ echo ""
 
 if systemctl is-enabled cloudflared-tunnel.service &>/dev/null; then
     info "Your tunnel URL will appear in the Cipher Station logs within ~30 seconds:"
-    echo "  sudo journalctl -u cipher station -f | grep 'Tunnel endpoint'"
+    echo "  sudo journalctl -u cipherstation -f | grep 'Tunnel endpoint'"
     echo ""
     info "LAN access (direct):"
     echo "  https://$(hostname -I | awk '{print $1}'):${CIPHER_PORT}/health"
     echo ""
     info "Useful commands:"
-    echo "  sudo systemctl status cipher station              # check status"
-    echo "  sudo journalctl -u cipher station -f              # view logs"
+    echo "  sudo systemctl status cipherstation              # check status"
+    echo "  sudo journalctl -u cipherstation -f              # view logs"
     echo "  sudo journalctl -u cloudflared-tunnel -f  # tunnel logs"
-    echo "  sudo systemctl restart cipher station             # restart"
+    echo "  sudo systemctl restart cipherstation             # restart"
     echo ""
     info "Next steps:"
     echo "  1. Edit .env to set CIPHER_PASSWORD"
@@ -884,9 +904,9 @@ else
     echo "  https://$(hostname -I | awk '{print $1}'):${CIPHER_PORT}/health"
     echo ""
     info "Useful commands:"
-    echo "  sudo systemctl status cipher station     # check status"
-    echo "  sudo journalctl -u cipher station -f     # view logs"
-    echo "  sudo systemctl restart cipher station    # restart"
+    echo "  sudo systemctl status cipherstation     # check status"
+    echo "  sudo journalctl -u cipherstation -f     # view logs"
+    echo "  sudo systemctl restart cipherstation    # restart"
     echo ""
     info "Next steps:"
     echo "  1. Edit .env to set CIPHER_PASSWORD and other config"
