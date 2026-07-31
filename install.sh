@@ -1188,7 +1188,9 @@ info "Your station's IPNS name (permanent, machine-readable address):"
 if [ -n "$IPNS_NAME" ]; then
     echo "  $IPNS_NAME"
 else
-    echo "  (could not read it — retry with:"
+    echo "  (could not read it here — the station serves it itself, no shell needed:"
+    echo "     https://${STATION_HOST}:${CIPHER_PORT}/profile   ->  \"ipns_name\""
+    echo "   or, with a shell on this box:"
     echo "     IPFS_PATH=$IPFS_REPO ipfs key list -l --ipns-base=base36)"
 fi
 echo ""
@@ -1201,6 +1203,7 @@ echo "  null) until you publish something."
 echo ""
 info "Your profile — served live by the station itself, not via IPFS:"
 echo "  https://${STATION_HOST}:${CIPHER_PORT}/profile"
+echo "  (a direct network address: it works from wherever this box is reachable)"
 echo ""
 
 # State the key-at-rest situation from the file the SERVICE reads, and say
@@ -1216,11 +1219,14 @@ else
     KEYS_AT_REST_NOTE="Setting it now would NOT encrypt them; there is no rotation path. Encryption at rest is chosen at install time via CIPHER_PASSWORD_SEED."
 fi
 
-info "Backup & restore (protects against microSD failure):"
 if [ -n "$CIPHER_DATA_ROOT" ]; then
     # No USB on a hosted box, and a backup written anywhere under
     # ${CIPHER_DATA_ROOT} is on the same mount as the live data, which backup.py
     # refuses. Don't print a `backup create` line that cannot succeed as shown.
+    # There is no shell-free path for any of this, so say whose job it is rather
+    # than handing a customer four steps they cannot start.
+    info "Backup & restore (protects against losing this box or its volume):"
+    echo "  Operator task — every step below needs a shell and root on this box."
     echo "  A backup must land on a DIFFERENT disk from ${CIPHER_DATA_ROOT}."
     echo "  Same-mount destinations are refused: one disk dies, both copies die."
     echo "  1. Attach a separate volume and mount it (e.g. /mnt/cipher-backup)."
@@ -1230,6 +1236,7 @@ if [ -n "$CIPHER_DATA_ROOT" ]; then
     echo "     ...or turn the daily timer back on (it is DISABLED right now):"
     echo "       sudo systemctl enable --now cipherstation-backup.timer"
 else
+    info "Backup & restore (protects against microSD failure):"
     echo "  Plug in a USB drive, then back up on demand:"
     echo "    ${CIPHER_DIR}/.venv/bin/python -m cipher_station.backup create"
     echo "  A daily backup also runs automatically when a USB drive is mounted (cipherstation-backup.timer)."
@@ -1240,13 +1247,33 @@ echo "    ./install.sh --restore=/path/to/cipherstation-backup-*.tar.gz"
 echo ""
 
 if systemctl is-enabled cloudflared-tunnel.service &>/dev/null; then
-    info "Your tunnel URL will appear in the Cipher Station logs within ~30 seconds:"
-    echo "  sudo journalctl -u cipherstation -f | grep 'Tunnel endpoint'"
+    # The tunnel URL is DATA THE STATION PUBLISHES, not something a human has to
+    # go and fetch. cipher_station/tunnel.py writes it into public.json as
+    # "endpoint" and calls publish_public_json_to_ipns(), so it reaches every
+    # client through the IPNS record; profile.get_public_profile() returns the
+    # same field at /profile. The old banner said "grep the logs", which is the
+    # third variant of the same bug (after "edit .env" and the pairing PIN):
+    # an instruction that assumes a shell on this box, when the customer of a
+    # managed station has none — and here it is not even necessary.
+    info "Your public tunnel URL — clients discover it on their own:"
+    echo "  The station writes it into public.json as \"endpoint\" and republishes"
+    echo "  the IPNS record, so anything that resolves the IPNS name above gets the"
+    echo "  current URL. The same value is served live at /profile (\"endpoint\")."
+    echo "  Nobody has to read a log or copy a URL by hand."
+    echo ""
+    echo "  It is EPHEMERAL: cloudflared takes a NEW random *.trycloudflare.com"
+    echo "  hostname every time it restarts (reboot, upgrade, crash). That is"
+    echo "  exactly why clients must resolve the IPNS name each time instead of"
+    echo "  pinning the URL — a pinned URL dies at the next restart. The station"
+    echo "  notices the change within ~60s and republishes by itself."
+    echo ""
+    echo "  Self-host convenience only (needs a shell on this box) — watch it land:"
+    echo "    sudo journalctl -u cipherstation -f | grep 'Tunnel endpoint'"
     echo ""
     info "LAN access (direct):"
-    echo "  https://$(hostname -I | awk '{print $1}'):${CIPHER_PORT}/health"
+    echo "  https://${STATION_HOST}:${CIPHER_PORT}/health"
     echo ""
-    info "Useful commands:"
+    info "Useful commands (need a shell on this box):"
     echo "  sudo systemctl status cipherstation              # check status"
     echo "  sudo journalctl -u cipherstation -f              # view logs"
     echo "  sudo journalctl -u cloudflared-tunnel -f  # tunnel logs"
@@ -1256,15 +1283,24 @@ if systemctl is-enabled cloudflared-tunnel.service &>/dev/null; then
     echo "  1. Identity keys are ${KEYS_AT_REST}."
     echo "     ${KEYS_AT_REST_NOTE}"
     echo "  2. The station's HTTP port is publicly reachable via the Cloudflare tunnel"
-    echo "     (no port forwarding needed). IPFS content still travels over 4001 —"
-    echo "     forward it on your router if you want peers to fetch from you directly."
+    if [ -n "$CIPHER_DATA_ROOT" ]; then
+        # A hosted box has no home router to forward anything on, and its
+        # customer has no console access to the one thing that could be changed.
+        echo "     (no port forwarding needed). IPFS content still travels over 4001 —"
+        echo "     opening it is a firewall change on this box, which is the operator's"
+        echo "     job, not yours. Nothing breaks without it: clients reach you over the"
+        echo "     tunnel, and IPFS still fetches your content via other peers."
+    else
+        echo "     (no port forwarding needed). IPFS content still travels over 4001 —"
+        echo "     forward it on your router if you want peers to fetch from you directly."
+    fi
     echo "  3. Share your IPNS name (above) with followers — clients resolve it to find you"
     echo "  4. Connect your Cipher Station client app"
 else
     info "Access your station:"
-    echo "  https://$(hostname -I | awk '{print $1}'):${CIPHER_PORT}/health"
+    echo "  https://${STATION_HOST}:${CIPHER_PORT}/health"
     echo ""
-    info "Useful commands:"
+    info "Useful commands (need a shell on this box):"
     echo "  sudo systemctl status cipherstation     # check status"
     echo "  sudo journalctl -u cipherstation -f     # view logs"
     echo "  sudo systemctl restart cipherstation    # restart"
@@ -1272,7 +1308,12 @@ else
     info "Next steps:"
     echo "  1. Identity keys are ${KEYS_AT_REST}."
     echo "     ${KEYS_AT_REST_NOTE}"
-    echo "  2. Forward these ports on your router:"
+    if [ -n "$CIPHER_DATA_ROOT" ]; then
+        echo "  2. Operator task — these ports must be opened in this box's firewall"
+        echo "     (there is no home router here, and no tunnel is running):"
+    else
+        echo "  2. Forward these ports on your router:"
+    fi
     echo "       ${CIPHER_PORT}/tcp            so clients can reach the station"
     echo "       4001/tcp + 4001/udp    so IPFS peers can fetch what you publish"
     echo "  3. Connect your Cipher Station client app"
