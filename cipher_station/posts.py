@@ -1,16 +1,17 @@
-# orbit_node/posts.py
+# cipher_station/posts.py
 import json
 import logging
+import time
 from typing import Literal, Optional
 
 from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
 
-from orbit_node.ipfs_client import ipfs_add_bytes, ipfs_get_bytes
-from orbit_node.followers import list_followers
-from orbit_node.manifest import add_post_to_manifest, add_public_post_to_manifest, load_manifest, remove_post_from_manifest
-from orbit_node.identity import get_identity
-from orbit_node.envelopes import open_envelope, encrypt_key_for_follower
+from cipher_station.ipfs_client import ipfs_add_bytes, ipfs_get_bytes
+from cipher_station.followers import list_followers
+from cipher_station.manifest import add_post_to_manifest, add_public_post_to_manifest, load_manifest, remove_post_from_manifest
+from cipher_station.identity import get_identity
+from cipher_station.envelopes import open_envelope, encrypt_key_for_follower
 
 logger = logging.getLogger(__name__)
 
@@ -144,14 +145,16 @@ def _filter_followers_for_audience(
 
 def handle_new_post(
     file_bytes: bytes,
-    metadata: dict | None = None,
+    metadata: dict | str | None = None,
     *,
     audience_mode: AudienceMode = "all",
     audience_uids: Optional[list[str]] = None,
     client: str | None = None,
+    created_at: int | None = None,
+    self_envelope: str | None = None,
 ):
     """
-    Encrypt post bytes, upload to IPFS, generate envelopes, and append to manifest.
+    Upload post bytes to IPFS, generate envelopes, and append to manifest.
 
     Post visibility is controlled by audience_mode:
       - "self": only self gets an envelope
@@ -160,11 +163,29 @@ def handle_new_post(
       - "public": NO encryption — file is uploaded as-is and is readable by anyone
                   via IPFS (no envelopes, plaintext metadata)
 
+    Symmetric key origin (non-public modes only) — two callers, two modes:
+      - Client-driven (the normal /post route): `self_envelope` is the sym_key
+        ML-KEM-sealed to the STATION's own public key, produced on-device.
+        `file_bytes` is already SecretBox-encrypted by the client, and
+        `metadata` (if any) is already an encrypted hex string. The station
+        only decapsulates the small envelope to recover sym_key for fanning
+        out follower envelopes — it never receives plaintext content or a key
+        sent outside a post-quantum-wrapped channel. This is what closes the
+        harvest-now-decrypt-later gap that plaintext-over-classical-TLS would
+        otherwise leave open.
+      - Station-driven (e.g. the private<->public migration in privacy.py,
+        which only ever re-packages content the station already holds): omit
+        `self_envelope`; the station generates a fresh key and encrypts here,
+        exactly as before. `metadata`, if given, is a plaintext dict.
+
     Notes:
       - Envelopes are published as a separate JSON to IPFS
       - Manifest stores envelopes_cid (not envelopes inline)
       - Followers list is deduped to ONE device per uid
       - Self uid is forced to the station ML-KEM public key (not delegate device)
+      - created_at, when provided, is written verbatim onto the new manifest
+        entry (else int(time.time())). The privacy flip passes the original
+        timestamp through so a migrated post keeps its creation time.
     """
     # Load the station identity (source of truth for "self")
     ident = get_identity()
@@ -187,6 +208,7 @@ def handle_new_post(
             post_cid=cid,
             metadata=metadata if isinstance(metadata, dict) else None,
             client=client,
+            created_at=created_at,
         )
         return {
             "status": "post_ok",
@@ -200,14 +222,17 @@ def handle_new_post(
             "manifest_posts": sum(len(b.get("posts", [])) for b in manifest.get("clients", {}).values()),
         }
 
-    # 1) Fresh symmetric key (per post)
-    sym_key = nacl_random(SecretBox.KEY_SIZE)
-    box = SecretBox(sym_key)
+    # 1) Recover (client-driven) or generate (station-driven) the symmetric key.
+    if self_envelope is not None:
+        sym_key = open_envelope(ident.mlkem_sk, self_envelope)
+        if not sym_key or len(sym_key) != SecretBox.KEY_SIZE:
+            raise ValueError("Failed to recover symmetric key from self_envelope")
+        encrypted_blob = file_bytes  # already SecretBox-encrypted client-side
+    else:
+        sym_key = nacl_random(SecretBox.KEY_SIZE)
+        encrypted_blob = SecretBox(sym_key).encrypt(file_bytes)
 
-    # 2) Encrypt post bytes
-    encrypted_blob = box.encrypt(file_bytes)
-
-    # 3) Upload encrypted blob to IPFS
+    # 2) Upload encrypted blob to IPFS
     cid = ipfs_add_bytes(encrypted_blob)
     logger.info(f"Encrypted post uploaded: CID={cid}")
 
@@ -234,12 +259,18 @@ def handle_new_post(
         pub_json=pub_json,
     )
 
-    # 5) Encrypt metadata (optional)
+    # 5) Metadata (optional): pre-encrypted hex from the client (self_envelope
+    # path), or a plaintext dict encrypted here (station-driven path).
     metadata_enc = None
     if metadata is not None:
-        if not isinstance(metadata, dict):
-            raise ValueError("metadata must be a dict or None")
-        metadata_enc = _encrypt_metadata(metadata, sym_key)
+        if self_envelope is not None:
+            if not isinstance(metadata, str):
+                raise ValueError("metadata must be a pre-encrypted hex string when self_envelope is provided")
+            metadata_enc = metadata
+        else:
+            if not isinstance(metadata, dict):
+                raise ValueError("metadata must be a dict when self_envelope is not provided")
+            metadata_enc = _encrypt_metadata(metadata, sym_key)
 
     # 6) Write manifest entry (store encrypted metadata only)
     manifest = add_post_to_manifest(
@@ -249,7 +280,8 @@ def handle_new_post(
         metadata_enc=metadata_enc,
         audience_mode=aud_mode,        # "self" | "specific" | "all"
         audience_uids=audience_uids,   # list[str] if specific
-        client=client,                 # client app name (e.g., "orbitstagram", "drive")
+        client=client,                 # client app name (e.g., "cipherframe", "drive")
+        created_at=created_at,         # preserve original timestamp on privacy flips
     )
 
     # 7) Pull the envelopes CID from the new entry (just appended) in the

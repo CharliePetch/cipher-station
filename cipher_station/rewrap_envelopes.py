@@ -1,16 +1,16 @@
-# orbit_node/rewrap_envelopes.py
+# cipher_station/rewrap_envelopes.py
 
 import json
 from typing import Dict, List, Tuple, Optional
 
 from nacl.secret import SecretBox
 
-from orbit_node import pqcrypto
-from orbit_node.config import PUBLIC_JSON_PATH
-from orbit_node.envelopes import open_envelope, encrypt_key_for_follower
-from orbit_node.followers import list_followers
-from orbit_node.ipfs_client import ipfs_get_bytes
-from orbit_node.manifest import (
+from cipher_station import pqcrypto
+from cipher_station.config import PUBLIC_JSON_PATH
+from cipher_station.envelopes import open_envelope, encrypt_key_for_follower
+from cipher_station.followers import list_followers
+from cipher_station.ipfs_client import ipfs_get_bytes
+from cipher_station.manifest import (
     load_manifest,
     save_manifest,
     _publish_envelopes_to_ipfs,

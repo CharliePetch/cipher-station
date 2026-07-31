@@ -1,13 +1,13 @@
-# orbit_node/auth.py
+# cipher_station/auth.py
 import base64
 import hmac
 import logging
 import time
 from fastapi import Depends, Header, HTTPException, Request
 
-from orbit_node import pqcrypto
-from orbit_node.followers import list_follower_devices
-from orbit_node.database import get_db
+from cipher_station import pqcrypto
+from cipher_station.followers import list_follower_devices
+from cipher_station.database import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -55,16 +55,16 @@ def _cleanup_nonces(now_ts: int):
 
 async def require_delegate(
     request: Request,
-    x_orbit_uid: str = Header(..., alias="x-orbit-uid"),
-    x_orbit_device: str = Header(..., alias="x-orbit-device"),
-    x_orbit_ts: str = Header(..., alias="x-orbit-ts"),
-    x_orbit_nonce: str = Header(..., alias="x-orbit-nonce"),
-    x_orbit_body_sha256: str = Header(..., alias="x-orbit-body-sha256"),
-    x_orbit_sig: str = Header(..., alias="x-orbit-sig"),
+    x_cipher_uid: str = Header(..., alias="x-cipher-uid"),
+    x_cipher_device: str = Header(..., alias="x-cipher-device"),
+    x_cipher_ts: str = Header(..., alias="x-cipher-ts"),
+    x_cipher_nonce: str = Header(..., alias="x-cipher-nonce"),
+    x_cipher_body_sha256: str = Header(..., alias="x-cipher-body-sha256"),
+    x_cipher_sig: str = Header(..., alias="x-cipher-sig"),
 ):
     # 1) time window
     try:
-        ts_i = int(x_orbit_ts)
+        ts_i = int(x_cipher_ts)
     except Exception:
         raise HTTPException(401, "bad timestamp")
 
@@ -80,9 +80,9 @@ async def require_delegate(
             pass
 
     # 2) device must be authorized (+ Allowed) and have an ML-DSA auth key
-    devices = list_follower_devices(x_orbit_uid)
+    devices = list_follower_devices(x_cipher_uid)
     dev = next(
-        (d for d in devices if d.get("device_uid") == x_orbit_device and d.get("allowed") == "Allowed"),
+        (d for d in devices if d.get("device_uid") == x_cipher_device and d.get("allowed") == "Allowed"),
         None,
     )
     if not dev:
@@ -93,13 +93,13 @@ async def require_delegate(
         raise HTTPException(403, "device has no auth (ML-DSA) public key")
 
     # 3) replay protection (check before recording; store only after auth succeeds)
-    if _nonce_seen(x_orbit_uid, x_orbit_device, x_orbit_nonce):
+    if _nonce_seen(x_cipher_uid, x_cipher_device, x_cipher_nonce):
         raise HTTPException(401, "replay")
 
     # 4) body-hash check WITHOUT consuming stream (set by the capture middleware)
     cached_sha = getattr(request.state, "raw_body_sha256", None)
     if cached_sha is not None:
-        if not hmac.compare_digest(cached_sha, x_orbit_body_sha256.lower()):
+        if not hmac.compare_digest(cached_sha, x_cipher_body_sha256.lower()):
             raise HTTPException(401, "bad body hash")
     # else: skip (assumes TLS / trusted path); still bound into the signed string.
 
@@ -112,27 +112,27 @@ async def require_delegate(
         raise HTTPException(401, "bad device auth public key length")
 
     try:
-        sig = base64.b64decode(x_orbit_sig, validate=True)
+        sig = base64.b64decode(x_cipher_sig, validate=True)
     except Exception:
         raise HTTPException(401, "bad signature encoding")
 
     msg = _canonical(
         request.method,
         request.url.path,
-        x_orbit_uid,
-        x_orbit_device,
-        x_orbit_ts,
-        x_orbit_nonce,
-        x_orbit_body_sha256.lower(),
+        x_cipher_uid,
+        x_cipher_device,
+        x_cipher_ts,
+        x_cipher_nonce,
+        x_cipher_body_sha256.lower(),
     )
 
     if not pqcrypto.verify(mldsa_pub, msg, sig):
         raise HTTPException(401, "bad auth")
 
     # 6) remember nonce only after successful verification
-    _remember_nonce(x_orbit_uid, x_orbit_device, x_orbit_nonce, ts_i)
+    _remember_nonce(x_cipher_uid, x_cipher_device, x_cipher_nonce, ts_i)
 
-    return {"uid": x_orbit_uid, "device_uid": x_orbit_device}
+    return {"uid": x_cipher_uid, "device_uid": x_cipher_device}
 
 
 async def require_owner(ctx: dict = Depends(require_delegate)) -> dict:
@@ -148,7 +148,7 @@ async def require_owner(ctx: dict = Depends(require_delegate)) -> dict:
     post as the owner, delete the owner's posts, or dump the follower list.
     """
     # Imported lazily to avoid any import-time coupling with identity loading.
-    from orbit_node.identity import get_identity
+    from cipher_station.identity import get_identity
 
     station_uid = get_identity().uid
     if not station_uid or ctx.get("uid") != station_uid:

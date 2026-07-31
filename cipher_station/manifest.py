@@ -1,16 +1,17 @@
-# orbit_node/manifest.py
+# cipher_station/manifest.py
 
 import json
 import logging
+import time
 from typing import Optional, Literal
 
-from orbit_node.config import MANIFEST_DIR, PUBLIC_JSON_PATH
+from cipher_station.config import MANIFEST_DIR, PUBLIC_JSON_PATH
 
 logger = logging.getLogger(__name__)
-from orbit_node import pqcrypto
-from orbit_node.storage import write_json
-from orbit_node.envelopes import encrypt_key_for_follower
-from orbit_node.ipfs_client import ipfs_add_bytes, ipfs_unpin, ipfs_repo_gc, publish_public_json_to_ipns
+from cipher_station import pqcrypto
+from cipher_station.storage import write_json
+from cipher_station.envelopes import encrypt_key_for_follower
+from cipher_station.ipfs_client import ipfs_add_bytes, ipfs_unpin, ipfs_repo_gc, publish_public_json_to_ipns
 
 MANIFEST_PATH = MANIFEST_DIR / "manifest.json"
 
@@ -32,7 +33,7 @@ def _normalize_manifest_shape(manifest: dict, *, default_client: Optional[str] =
     }
 
     Back-compat:
-      - If we load an old shape like {"client":"orbitstagram","posts":[...]}
+      - If we load an old shape like {"client":"cipherframe","posts":[...]}
         we migrate it in-memory to the new clients map.
       - If we load {"posts":[...]} with no client, we place it under default_client
         if provided, else under "default".
@@ -144,6 +145,7 @@ def add_post_to_manifest(
     audience_mode: AudienceMode = "all",
     audience_uids: Optional[list[str]] = None,
     client: Optional[str] = None,          # REQUIRED conceptually; defaults to "default" if missing
+    created_at: int | None = None,         # preserve original timestamp on privacy flips
 ) -> dict:
     """
     New behavior:
@@ -210,6 +212,7 @@ def add_post_to_manifest(
         "audience_mode": audience_mode,
         "envelopes_cid": envelopes_cid,
         "envelopes_count": len(envelopes),
+        "created_at": created_at if created_at is not None else int(time.time()),
     }
 
     if audience_mode == "specific":
@@ -228,6 +231,7 @@ def add_public_post_to_manifest(
     metadata: dict | None = None,
     *,
     client: Optional[str] = None,
+    created_at: int | None = None,         # preserve original timestamp on privacy flips
 ) -> dict:
     """
     Append a PUBLIC (unencrypted) post to the manifest.
@@ -245,6 +249,7 @@ def add_public_post_to_manifest(
         "encrypted": False,
         "envelopes_cid": None,
         "envelopes_count": 0,
+        "created_at": created_at if created_at is not None else int(time.time()),
     }
     if metadata is not None:
         if not isinstance(metadata, dict):
@@ -259,6 +264,10 @@ def _append_entry_and_publish(entry: dict, client_key: str) -> dict:
     Append a post entry to the client's bucket, save locally, publish the
     manifest to IPFS, and update the public.json pointer (+ IPNS).
     """
+    # Guarantee every entry carries a creation timestamp (covers both the
+    # encrypted and public paths; preserved if a caller already set one).
+    entry.setdefault("created_at", int(time.time()))
+
     manifest = load_manifest(client=client_key)
     manifest = _normalize_manifest_shape(manifest, default_client=client_key)
 
@@ -277,6 +286,59 @@ def _append_entry_and_publish(entry: dict, client_key: str) -> dict:
     _update_public_json_manifest_pointer(manifest_cid)
 
     return manifest
+
+
+# -----------------------------
+# Client profile (lives in the manifest, NOT public.json)
+# -----------------------------
+
+# The Instagram-style profile chrome is client data, namespaced per client in
+# the manifest — it does NOT belong in public.json (the station's protocol
+# identity document).
+CLIENT_PROFILE_FIELDS = (
+    "display_name", "username", "bio", "link",
+    "avatar_cid", "account_privacy", "default_audience_mode",
+)
+
+
+def get_client_profile(client: Optional[str] = None) -> dict:
+    """Return the profile object stored in a client's manifest bucket (or {})."""
+    client_key = (client or "default").strip() or "default"
+    manifest = load_manifest(client=client_key)
+    bucket = manifest.get("clients", {}).get(client_key, {})
+    prof = bucket.get("profile") if isinstance(bucket, dict) else None
+    return dict(prof) if isinstance(prof, dict) else {}
+
+
+def set_client_profile(fields: dict, *, client: Optional[str] = None) -> dict:
+    """
+    Merge ``fields`` into the client's manifest ``profile`` object, then publish
+    the manifest to IPFS + update the public.json pointer (+ IPNS) — exactly like
+    a post mutation. Returns the updated profile dict.
+    """
+    client_key = (client or "default").strip() or "default"
+
+    manifest = load_manifest(client=client_key)
+    manifest = _normalize_manifest_shape(manifest, default_client=client_key)
+
+    bucket = manifest["clients"].setdefault(client_key, {"posts": []})
+    if not isinstance(bucket, dict):
+        bucket = {"posts": []}
+        manifest["clients"][client_key] = bucket
+    bucket.setdefault("posts", [])
+
+    profile = bucket.get("profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    profile.update(fields)
+    profile["updated_at"] = int(time.time())
+    bucket["profile"] = profile
+
+    save_manifest(manifest, client=client_key)
+    manifest_cid = _publish_manifest_to_ipfs(manifest)
+    _update_public_json_manifest_pointer(manifest_cid)
+
+    return profile
 
 
 def remove_post_from_manifest(

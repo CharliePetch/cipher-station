@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# SECRETS AND LIVE STATE — never commit. This repo is public.
+# ---------------------------------------------------------------------------
+# The running station's own data: ML-KEM/ML-DSA private keys, the SQLite DB,
+# manifests, and public.json (whose hash is a live canary). Publishing any of
+# it would expose this station's cryptographic identity irrecoverably.
+cipher_station_data/
+
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Separate projects that live in their own repositories
+# ---------------------------------------------------------------------------
+# Managed-hosting SaaS — its own (private) repo; holds Stripe/Neon/Google creds.
+cipher-hosting/
+# Marketing site — already has its own git repo and Vercel project.
+website/
+website.zip
+# iOS clients — not versioned here.
+CipherVault/
+CipherFrame/
+
+# ---------------------------------------------------------------------------
+# Build artifacts, caches, local tooling
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+node_modules/
+
+.claude/
+.DS_Store
+Thumbs.db

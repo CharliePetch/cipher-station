@@ -1,6 +1,6 @@
-# orbit_node/pqcrypto.py
+# cipher_station/pqcrypto.py
 """
-Post-quantum cryptographic primitives for Orbit.
+Post-quantum cryptographic primitives for Cipher Station.
 
 Two NIST-standardized schemes:
   * ML-KEM-768  (FIPS 203)  -> content envelopes / key wrapping
@@ -28,7 +28,7 @@ The actual ML-KEM / ML-DSA math is provided by a pluggable backend:
                  with no native build (piwheels-friendly on a Raspberry Pi), but
                  NOT constant-time / self-described as educational.
 
-Selection is controlled by the ORBIT_PQC_BACKEND env var:
+Selection is controlled by the CIPHER_PQC_BACKEND env var:
   * "auto" (default) -> use liboqs if it imports AND passes a self-test, else python
   * "liboqs"         -> require liboqs (raises if unavailable)
   * "python"         -> force pure-Python
@@ -158,14 +158,14 @@ def _self_test(backend) -> None:
     if backend.mlkem_decaps(sec, ct) != ss or len(ss) != 32:
         raise RuntimeError("ML-KEM self-test failed")
     pk, sk = backend.mldsa_keygen()
-    msg = b"orbit-pqc-backend-selftest"
+    msg = b"cipherstation-pqc-backend-selftest"
     sig = backend.mldsa_sign(sk, msg)
     if not backend.mldsa_verify(pk, msg, sig) or backend.mldsa_verify(pk, msg + b"x", sig):
         raise RuntimeError("ML-DSA self-test failed")
 
 
 def _select_backend():
-    pref = os.getenv("ORBIT_PQC_BACKEND", "auto").strip().lower()
+    pref = os.getenv("CIPHER_PQC_BACKEND", "auto").strip().lower()
 
     if pref in ("python", "pure", "kyber-py"):
         b = _PurePythonBackend()

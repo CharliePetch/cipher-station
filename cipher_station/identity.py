@@ -1,4 +1,4 @@
-# orbit_node/identity.py
+# cipher_station/identity.py
 
 import json
 import logging
@@ -6,15 +6,15 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from orbit_node import pqcrypto
-from orbit_node.crypto import encrypt_private_keys, decrypt_private_keys
-from orbit_node.config import KEYS_DIR, PUBLIC_JSON_PATH, ORBIT_PASSWORD, ensure_directories
+from cipher_station import pqcrypto
+from cipher_station.crypto import encrypt_private_keys, decrypt_private_keys
+from cipher_station.config import KEYS_DIR, PUBLIC_JSON_PATH, CIPHER_PASSWORD, ensure_directories
 
 logger = logging.getLogger(__name__)
 
 # Secret-key files. Each stores  public_key || secret_key  so the public key is
 # always recoverable from the file alone (optionally encrypted-at-rest when
-# ORBIT_PASSWORD is set). X25519 (the old 64-byte private.bin) is gone.
+# CIPHER_PASSWORD is set). X25519 (the old 64-byte private.bin) is gone.
 MLKEM_KEY_PATH = KEYS_DIR / "mlkem.bin"   # ek(1184) || dk(2400)
 MLDSA_KEY_PATH = KEYS_DIR / "mldsa.bin"   # pk(1952) || sk(4032)
 
@@ -23,6 +23,23 @@ _MLDSA_BUNDLE_LEN = pqcrypto.MLDSA_PUBLIC_BYTES + pqcrypto.MLDSA_SECRET_BYTES
 
 # Cached identity
 _cached_identity = None
+
+# The Instagram-style profile fields (display_name, username, bio, link,
+# avatar_cid, account_privacy, default_audience_mode) are CLIENT data and live in
+# the manifest (clients.<client>.profile), NOT in public.json. public.json is the
+# station's protocol identity only. Older builds wrote them here; strip them on
+# load so the document stays clean (a startup migration relocates the values).
+_LEGACY_PROFILE_FIELDS = (
+    "display_name", "username", "bio", "link",
+    "avatar_cid", "account_privacy", "default_audience_mode",
+)
+
+
+def _strip_legacy_profile_fields(obj: dict) -> dict:
+    """Remove client-profile fields that older builds wrote into public.json."""
+    for key in _LEGACY_PROFILE_FIELDS:
+        obj.pop(key, None)
+    return obj
 
 
 @dataclass(frozen=True)
@@ -59,7 +76,7 @@ def _read_key_bundle(path: Path, expected_len: int, pub_len: int,
     if len(raw) != expected_len:
         raise ValueError(
             f"{path.name} is {len(raw)} bytes after decoding, expected {expected_len}. "
-            "If ORBIT_PASSWORD changed, the key cannot be decrypted."
+            "If CIPHER_PASSWORD changed, the key cannot be decrypted."
         )
     return raw[:pub_len], raw[pub_len:]
 
@@ -84,7 +101,7 @@ def get_identity() -> Identity:
     """Return the cached station Identity, loading from disk on first call."""
     global _cached_identity
     if _cached_identity is None:
-        _cached_identity = load_identity(password=ORBIT_PASSWORD or None)
+        _cached_identity = load_identity(password=CIPHER_PASSWORD or None)
         logger.info("Identity loaded and cached")
     return _cached_identity
 
@@ -117,6 +134,9 @@ def _load_public_json(mlkem_pub_hex: str, mldsa_pub_hex: str) -> dict:
         obj = {"uid": str(uuid.uuid4()), "alias": None, "endpoint": None,
                "manifest_pointer": None, "followers_cid": None,
                "following_cid": None, "follow_decoder_envelopes_cid": None}
+    # Keep public.json protocol-only: strip any client-profile fields older
+    # builds may have written here (they now live in the manifest).
+    obj = _strip_legacy_profile_fields(obj)
     return _write_public_json(obj, mlkem_pub_hex, mldsa_pub_hex)  # force consistency
 
 

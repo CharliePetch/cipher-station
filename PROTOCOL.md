@@ -1,4 +1,4 @@
-# Orbit Protocol Specification
+# Cipher Station Protocol Specification
 
 **Version:** 2.0-draft
 **Date:** 2026-06-04
@@ -8,9 +8,9 @@
 
 ## Abstract
 
-Orbit is a self-hosted, end-to-end encrypted content sharing protocol built on IPFS. A user runs a **station** (e.g., on a Raspberry Pi at home), publishes encrypted content to IPFS, and provisions access to friends, family, or followers via cryptographic **envelopes** containing per-post decryption keys. The station owner's content is replicated and made available through IPFS's content-addressed storage, removing dependence on centralized platforms.
+Cipher Station is a self-hosted, end-to-end encrypted content sharing protocol built on IPFS. A user runs a **station** (e.g., on a Raspberry Pi at home), publishes encrypted content to IPFS, and provisions access to friends, family, or followers via cryptographic **envelopes** containing per-post decryption keys. The station owner's content is replicated and made available through IPFS's content-addressed storage, removing dependence on centralized platforms.
 
-Orbit is **post-quantum**: content confidentiality uses ML-KEM-768 (FIPS 203) key encapsulation and device authentication uses ML-DSA-65 (FIPS 204) digital signatures. The legacy X25519/SealedBox/HMAC scheme has been removed entirely (see Section 20).
+Cipher Station is **post-quantum**: content confidentiality uses ML-KEM-768 (FIPS 203) key encapsulation and device authentication uses ML-DSA-65 (FIPS 204) digital signatures. The legacy X25519/SealedBox/HMAC scheme has been removed entirely (see Section 20).
 
 The protocol is designed to be **extensible**: different application-layer **clients** (photo sharing, file storage, document collaboration, etc.) share the same identity, encryption, and access-control infrastructure while defining their own metadata schemas within a unified manifest.
 
@@ -30,13 +30,13 @@ All integers are unsigned unless otherwise noted. All strings are UTF-8. Hexadec
 
 | Term | Definition |
 |------|------------|
-| **Station** | The user's self-hosted Orbit node. Holds the root secret keys (ML-KEM + ML-DSA). Runs the API server and local IPFS daemon. Typically a Raspberry Pi or similar always-on device. |
+| **Station** | The user's self-hosted Cipher Station node. Holds the root secret keys (ML-KEM + ML-DSA). Runs the API server and local IPFS daemon. Typically a Raspberry Pi or similar always-on device. |
 | **Delegate** | A secondary device (phone, laptop) paired with the station. Has its own ML-KEM-768 keypair (content) and ML-DSA-65 keypair (auth) but relies on the station for envelope rewrapping. |
-| **UID** | A UUID v4 string that uniquely identifies a user across the Orbit network. |
+| **UID** | A UUID v4 string that uniquely identifies a user across the Cipher Station network. |
 | **Device UID** | A UUID v4 string that uniquely identifies a single device belonging to a user. For a station, `device_uid` equals `uid`. |
 | **Envelope** | An ML-KEM-768 KEM-DEM wrapping of a 32-byte symmetric key, encapsulated to a specific recipient's ML-KEM-768 public key. |
 | **Manifest** | A JSON document listing all posts across all clients, with pointers to encrypted content and envelope files on IPFS. Published to IPFS; its CID is stored in `public.json` as `manifest_pointer`. |
-| **Client** | An application-layer module that uses the Orbit protocol for a specific use case (e.g., `orbitstagram` for photos, `orbitdrive` for files). Each client occupies a namespace within the manifest. |
+| **Client** | An application-layer module that uses the Cipher Station protocol for a specific use case (e.g., `cipherframe` for photos, `ciphervault` for files). Each client occupies a namespace within the manifest. |
 | **CID** | Content Identifier. An IPFS content-addressed hash (typically CIDv0/Base58). |
 | **Post** | A single encrypted content blob stored on IPFS, along with its associated envelopes and metadata. |
 | **Audience** | The set of UIDs permitted to decrypt a given post. Controlled by `audience_mode`. A `public` post has no envelopes and is stored unencrypted, readable by anyone. |
@@ -63,7 +63,7 @@ All integers are unsigned unless otherwise noted. All strings are UTF-8. Hexadec
 ```
 
 A station consists of:
-- An **Orbit server** (HTTP API)
+- An **Cipher Station server** (HTTP API)
 - A **local IPFS daemon** (Kubo, port 5001)
 - A **SQLite database** for follower/device state
 - A **local filesystem** for key material and manifests
@@ -75,7 +75,7 @@ Delegate devices communicate with the station over HTTP (ideally HTTPS in produc
 
 The **station** is the root of trust:
 - It holds the only copy of the user's root secret keys (ML-KEM decapsulation key and ML-DSA signing key).
-- It generates all envelopes (encrypts symmetric keys for recipients).
+- It generates follower/delegate envelopes (encrypts symmetric keys for recipients). For a `POST /post` upload it recovers the key by decapsulating the client-sealed `self_envelope` rather than generating it itself (see Section 7.1); it only ever generates a fresh key directly for its own internal private/public migration, which re-packages content it already holds and never touches the network.
 - It approves or denies follow requests.
 - It performs envelope rewrapping for delegate devices.
 
@@ -87,7 +87,7 @@ The **station** is the root of trust:
 
 ```
  +-------------------------------------------+
- |  Client Layer (orbitstagram, orbitdrive)   |  Application-specific metadata
+ |  Client Layer (cipherframe, ciphervault)   |  Application-specific metadata
  +-------------------------------------------+
  |  Manifest Layer                            |  Post index, envelope pointers
  +-------------------------------------------+
@@ -148,7 +148,7 @@ Used for creating envelopes (wrapping per-post symmetric keys for specific recip
 - **Input:** a 32-byte symmetric key, recipient ML-KEM-768 public (encapsulation) key
 - **Sizes:** public/encapsulation key = 1184 bytes; secret/decapsulation key = 2400 bytes; KEM ciphertext = 1088 bytes; shared secret = 32 bytes
 
-ML-KEM is a Key Encapsulation Mechanism: it produces a *random* shared secret rather than encrypting a caller-chosen plaintext. To wrap a chosen 32-byte symmetric key, Orbit uses the standard **KEM-DEM** construction:
+ML-KEM is a Key Encapsulation Mechanism: it produces a *random* shared secret rather than encrypting a caller-chosen plaintext. To wrap a chosen 32-byte symmetric key, Cipher Station uses the standard **KEM-DEM** construction:
 
 ```
 shared_secret, kem_ct = ML_KEM_768.encaps(recipient_mlkem_pubkey)   # 32 B, 1088 B
@@ -187,7 +187,7 @@ Used for encrypting the station's secret-key files (`mlkem.bin`, `mldsa.bin`) at
 +--------+----------------------------------+
 ```
 
-The encryption is applied only when `ORBIT_PASSWORD` is set; otherwise the bundle (`public_key || secret_key`) is written in the clear. See Section 5.2 for the bundle layouts.
+The encryption is applied only when `CIPHER_PASSWORD` is set; otherwise the bundle (`public_key || secret_key`) is written in the clear. See Section 5.2 for the bundle layouts.
 
 ### 4.5 PIN Hashing (scrypt)
 
@@ -207,7 +207,7 @@ There is **no** auth key derivation. The previous scheme derived an HMAC key fro
 - **Secret key:** the device's ML-DSA-65 secret key (4032 bytes)
 - **Public key:** the device's ML-DSA-65 public key (1952 bytes), stored by the station
 - **Message:** canonical request string (see Section 12)
-- **Signature:** 3309 bytes, transmitted base64-encoded (~4412 base64 characters) in the `x-orbit-sig` header
+- **Signature:** 3309 bytes, transmitted base64-encoded (~4412 base64 characters) in the `x-cipher-sig` header
 
 ---
 
@@ -215,7 +215,7 @@ There is **no** auth key derivation. The previous scheme derived an HMAC key fro
 
 ### 5.1 Identity Structure
 
-Each Orbit identity consists of:
+Each Cipher Station identity consists of:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -228,7 +228,7 @@ Each Orbit identity consists of:
 
 The station stores its secret keys in **two** binary files, each holding `public_key || secret_key` so the public key is always recoverable from the file alone:
 
-**File:** `orbit_data/keys/mlkem.bin` (ML-KEM-768, content)
+**File:** `cipher_station_data/keys/mlkem.bin` (ML-KEM-768, content)
 
 ```
 +----------------------------+----------------------------+
@@ -239,7 +239,7 @@ The station stores its secret keys in **two** binary files, each holding `public
 
 Total: 3584 bytes.
 
-**File:** `orbit_data/keys/mldsa.bin` (ML-DSA-65, auth)
+**File:** `cipher_station_data/keys/mldsa.bin` (ML-DSA-65, auth)
 
 ```
 +---------------+---------------+
@@ -250,11 +250,11 @@ Total: 3584 bytes.
 
 Total: 5984 bytes.
 
-Each file is written in the clear by default. When `ORBIT_PASSWORD` is set, each file is encrypted at rest using the Argon2i scheme described in Section 4.4 (16-byte salt + SecretBox). The legacy single `keys/private.bin` (64-byte X25519 keypair) has been removed.
+Each file is written in the clear by default. When `CIPHER_PASSWORD` is set, each file is encrypted at rest using the Argon2i scheme described in Section 4.4 (16-byte salt + SecretBox). The legacy single `keys/private.bin` (64-byte X25519 keypair) has been removed.
 
 ### 5.3 Public Identity Document
 
-**File:** `orbit_data/public.json`
+**File:** `cipher_station_data/public.json`
 
 Every station MUST publish a public identity document:
 
@@ -372,28 +372,68 @@ When creating a new post, the station first checks the `audience_mode`.
 
 1. Upload the raw file bytes directly to IPFS (NO symmetric key, NO encryption) -> `post_cid`.
 2. Append a public manifest entry with `"audience_mode": "public"`, `"encrypted": false`, `"envelopes_cid": null`, `"envelopes_count": 0`, and any `metadata` stored **in the clear** as a plaintext JSON object (NOT a hex blob).
-3. Publish the manifest and update the pointer (Steps 8–9 below).
+3. Publish the manifest and update the pointer (Steps 7–8 below).
 
 No envelopes JSON is created. The content is world-readable via any IPFS gateway at `https://<gateway>/ipfs/<post_cid>` and discoverable through the public IPNS manifest. **Warning:** public IPFS content is permanent and world-readable; it cannot be reliably unpublished once peers have cached it.
 
 **Encrypted posts (`self` / `specific` / `all`) execute the following steps:**
 
-**Step 1: Generate symmetric key**
+**Steps 1-3 happen ON THE CLIENT, before the upload request is ever sent.** This is
+deliberate: the transport between a client and the station is ordinary HTTPS, which
+uses classical (non-post-quantum) key exchange. If the file and its key crossed that
+transport as plaintext, a party recording the encrypted session today could recover
+both once classical key exchange is eventually broken — a harvest-now-decrypt-later
+(HNDL) attack. Doing steps 1-3 client-side, and wrapping the key with ML-KEM-768
+(Step 3b) before it ever leaves the device, means nothing sent over the wire is
+useful to harvest: the file body is opaque symmetric ciphertext, and the only thing
+that could reveal its key is itself protected by the same post-quantum primitive the
+rest of the protocol relies on.
+
+**Step 1: Generate symmetric key (client)**
 ```
 sym_key = random(32)  # NaCl SecretBox.KEY_SIZE
 ```
 
-**Step 2: Encrypt content**
+**Step 2: Encrypt content (client)**
 ```
 box = SecretBox(sym_key)
 encrypted_blob = box.encrypt(plaintext_bytes)
 # Output: nonce(24) + ciphertext + tag(16)
 ```
 
-**Step 3: Upload to IPFS**
+**Step 3a: Encrypt metadata, if any (client)**
 ```
-post_cid = ipfs_add_bytes(encrypted_blob)
+metadata_json = compact_json(metadata_dict)
+encrypted_metadata = SecretBox(sym_key).encrypt(metadata_json)
+metadata_hex = encrypted_metadata.hex()
 ```
+
+**Step 3b: Seal the key to the station's own public key (client)**
+```
+self_envelope = mlkem_seal_key(sym_key, station_mlkem_public_key)  # hex KEM-DEM envelope
+```
+
+The client already has `station_mlkem_public_key` — captured during pairing (delegates)
+or read from the station's own identity (the station's own client instance) — so this
+requires no extra round trip.
+
+**Step 3c: Upload (client -> station, `POST /post`)**
+
+The request carries `file` (the encrypted blob), `metadata` (the hex string from Step
+3a, if any), and `self_envelope` (from Step 3b). `self_envelope` is REQUIRED whenever
+`audience_mode` is not `public`; the station rejects the request with `400` otherwise.
+
+**Step 3d: Recover the key and store the blob (station)**
+```
+sym_key = mlkem_open_envelope(self_envelope, station_mlkem_secret_key)
+post_cid = ipfs_add_bytes(file_bytes)  # already encrypted — stored as received, never decrypted
+```
+
+The station never sees plaintext content, and the only material it decapsulates
+(`self_envelope`) is itself ML-KEM-sealed — nothing PQ-vulnerable ever touches the
+transport layer. From here the station proceeds exactly as before: it already holds
+`sym_key` in memory, so it fans out follower envelopes the same way regardless of
+where the key came from.
 
 **Step 4: Determine recipients**
 
@@ -432,21 +472,15 @@ The station's self-envelope is always included, encapsulated to the station's ow
 envelopes_cid = ipfs_add_bytes(compact_json(envelopes_doc))
 ```
 
-**Step 7: Encrypt metadata (optional)**
+(Metadata, if any, was already encrypted client-side in Step 3a and arrived as
+`metadata_hex` — the station stores it as-is, it never encrypts metadata itself
+for a client-driven upload.)
 
-If the post has associated metadata (caption, filename, etc.), it is encrypted with the same symmetric key:
-
-```
-metadata_json = compact_json(metadata_dict)
-encrypted_metadata = SecretBox(sym_key).encrypt(metadata_json)
-metadata_hex = encrypted_metadata.hex()
-```
-
-**Step 8: Append to manifest**
+**Step 7: Append to manifest**
 
 See Section 8.
 
-**Step 9: Publish manifest to IPFS and update pointer**
+**Step 8: Publish manifest to IPFS and update pointer**
 ```
 manifest_cid = ipfs_add_bytes(compact_json(manifest))
 public.json["manifest_pointer"] = manifest_cid
@@ -566,7 +600,7 @@ Implementations SHOULD support loading the legacy flat manifest format and norma
 **Legacy format:**
 ```json
 {
-  "client": "orbitstagram",
+  "client": "cipherframe",
   "posts": [...]
 }
 ```
@@ -575,7 +609,7 @@ Implementations SHOULD support loading the legacy flat manifest format and norma
 ```json
 {
   "clients": {
-    "orbitstagram": {
+    "cipherframe": {
       "posts": [...]
     }
   }
@@ -900,7 +934,7 @@ The canonical string is UTF-8 encoded before signing. The canonical string forma
 signature = ML_DSA_65.sign(device_mldsa_secret_key, canonical_string_bytes)   # 3309 bytes
 ```
 
-The signature is **base64-encoded** for transmission (~4412 base64 characters) in the `x-orbit-sig` header. The station decodes the base64 and verifies with `ML_DSA_65.verify(device_mldsa_public_key, canonical_string_bytes, signature)`.
+The signature is **base64-encoded** for transmission (~4412 base64 characters) in the `x-cipher-sig` header. The station decodes the base64 and verifies with `ML_DSA_65.verify(device_mldsa_public_key, canonical_string_bytes, signature)`.
 
 ### 12.5 HTTP Headers
 
@@ -908,12 +942,12 @@ Authenticated requests MUST include the following headers:
 
 | Header | Value |
 |--------|-------|
-| `x-orbit-uid` | User UUID |
-| `x-orbit-device` | Device UUID |
-| `x-orbit-ts` | Unix timestamp (seconds) |
-| `x-orbit-nonce` | Random hex string |
-| `x-orbit-body-sha256` | Lowercase hex SHA-256 of request body |
-| `x-orbit-sig` | Base64-encoded ML-DSA-65 signature over the canonical string |
+| `x-cipher-uid` | User UUID |
+| `x-cipher-device` | Device UUID |
+| `x-cipher-ts` | Unix timestamp (seconds) |
+| `x-cipher-nonce` | Random hex string |
+| `x-cipher-body-sha256` | Lowercase hex SHA-256 of request body |
+| `x-cipher-sig` | Base64-encoded ML-DSA-65 signature over the canonical string |
 
 ### 12.6 Server Verification
 
@@ -923,7 +957,7 @@ The station verifies authenticated requests in this order:
 2. **Device authorization:** Look up device in followers table. MUST have `allowed == "Allowed"` AND have a stored `mldsa_public_key`.
 3. **Replay protection:** Check nonce against the nonce table. Reject if seen before. (The nonce is recorded only after the signature verifies — see step 6.)
 4. **Body integrity:** If the middleware captured a body SHA-256, compare against the header value (constant-time).
-5. **Signature verification:** Decode the device's ML-DSA public key and the base64 `x-orbit-sig` value, then verify the signature over the canonical string with `ML_DSA_65.verify`.
+5. **Signature verification:** Decode the device's ML-DSA public key and the base64 `x-cipher-sig` value, then verify the signature over the canonical string with `ML_DSA_65.verify`.
 6. **Record nonce:** After successful verification, store the nonce in the database to prevent replay.
 
 **Error responses:**
@@ -975,7 +1009,7 @@ Content-Type: application/json
 **Processing:**
 1. Validate that the follower uid is not the station's own uid (prevents self-injection).
 2. Validate each device entry has a valid `device_uid` and a 2368-hex-char `mlkem_public_key`; if `mldsa_public_key` is present it MUST be 3904 hex chars.
-3. Check device cap: max 20 devices per follower (configurable via `ORBIT_MAX_DEVICES_PER_FOLLOWER`).
+3. Check device cap: max 20 devices per follower (configurable via `CIPHER_MAX_DEVICES_PER_FOLLOWER`).
 4. Register each device in the followers table.
 5. If any new devices were added or keys rotated, optionally trigger envelope rewrap for all existing posts.
 
@@ -1005,7 +1039,7 @@ The uid is used as both uid and device_uid. Behaves the same as multi-device wit
 
 ### 13.3 Auto-Rewrap on Follow Change
 
-When a new follower is accepted (or an existing follower's key changes), the station MAY automatically rewrap all post envelopes to include the new follower. This is controlled by the `ORBIT_AUTO_REWRAP_ON_FOLLOW_CHANGE` environment variable (default: enabled).
+When a new follower is accepted (or an existing follower's key changes), the station MAY automatically rewrap all post envelopes to include the new follower. This is controlled by the `CIPHER_AUTO_REWRAP_ON_FOLLOW_CHANGE` environment variable (default: enabled).
 
 The rewrap process:
 1. For each post in the manifest:
@@ -1076,13 +1110,14 @@ Create a new encrypted post.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `file` | binary | MUST | Raw file content (encrypted unless `audience_mode` is `public`) |
-| `metadata` | string (JSON) | MAY | Client-specific metadata JSON string |
+| `file` | binary | MUST | File content. For `audience_mode != public`, MUST already be `SecretBox(sym_key)`-encrypted by the client — the station never receives plaintext content. Raw/unencrypted only when `audience_mode` is `public`. |
+| `metadata` | string | MAY | For `audience_mode != public`: already `SecretBox(sym_key)`-encrypted, hex-encoded, stored as-is. For `public`: a plaintext JSON string. |
+| `self_envelope` | string (hex) | MUST if `audience_mode != public` | `sym_key` ML-KEM-768-sealed to the station's own public key (KEM-DEM, same wire format as Section 6). The station decapsulates this to recover `sym_key` — it is never sent the key or the content in the clear. Omitting this for a non-`public` post is rejected with `400`. |
 | `client` | string | MAY | Client namespace (defaults to `default`) |
 | `audience_mode` | string | MAY | One of `self`, `specific`, `all` (default), `public` |
 | `audience_uids` | string (JSON array or CSV) | MUST if `specific` | Target UIDs when `audience_mode` is `specific` |
 
-When `audience_mode` is `public`, the file is uploaded unencrypted and any `metadata` is stored in the clear (see Section 7.1 and the warning in Section 8.4).
+When `audience_mode` is `public`, the file is uploaded unencrypted and any `metadata` is stored in the clear (see Section 7.1 and the warning in Section 8.4). Otherwise, all encryption (`file`, `metadata`, and the key sealed into `self_envelope`) happens client-side before the request is sent — see Section 7.1's harvest-now-decrypt-later rationale.
 
 **Response:**
 ```json
@@ -1191,21 +1226,39 @@ Confirm device pairing with PIN. See Section 10.4, Step 3.
 
 ## 15. Message Flows
 
-### 15.1 Post Creation (Station)
+### 15.1 Post Creation (Client-Driven, `audience_mode != public`)
 
 ```
-Station                         IPFS
-  |                               |
-  |  1. Generate sym_key (32B)    |
-  |  2. Encrypt content           |
-  |  3. Upload encrypted blob --->|---> post_cid
-  |  4. Build per-uid envelopes   |
-  |  5. Upload envelopes JSON --->|---> envelopes_cid
-  |  6. Update manifest           |
-  |  7. Upload manifest --------->|---> manifest_cid
-  |  8. Update public.json        |
-  |                               |
+Client                Station                        IPFS
+  |                      |                              |
+  |  1. Generate sym_key |                              |
+  |  2. Encrypt content  |                              |
+  |  3. Seal sym_key to  |                              |
+  |     station pubkey   |                              |
+  |     (self_envelope)  |                              |
+  |--- POST /post ------>|                              |
+  |  (ciphertext file,   |                              |
+  |   enc. metadata,     |                              |
+  |   self_envelope)     |                              |
+  |                      |  4. Decapsulate self_envelope|
+  |                      |     -> sym_key               |
+  |                      |  5. Upload blob as-received ->|---> post_cid
+  |                      |  6. Build per-uid envelopes   |
+  |                      |  7. Upload envelopes JSON --->|---> envelopes_cid
+  |                      |  8. Update manifest           |
+  |                      |  9. Upload manifest --------->|---> manifest_cid
+  |                      |  10. Update public.json       |
+  |                      |                               |
 ```
+
+Nothing sent over the Client -> Station leg is useful to a harvest-now-decrypt-later
+attacker: the file and metadata are opaque symmetric ciphertext, and `self_envelope`
+is itself ML-KEM-768-sealed. See Section 7.1.
+
+A `public` post (or the station's own internal private<->public migration, which
+never touches the network) still follows the older station-generates-the-key path —
+there is no plaintext-over-the-wire concern there since the content is either meant
+to be world-readable, or never leaves the station's own process.
 
 ### 15.2 Content Retrieval (Delegate)
 
@@ -1326,7 +1379,7 @@ This flow allows followers to find a station even when its HTTP endpoint has cha
 
 ### 16.1 Overview
 
-The Orbit protocol is designed to support multiple application-layer clients sharing the same identity, encryption, and access-control infrastructure. Each client defines its own namespace within the manifest and its own metadata schema.
+The Cipher Station protocol is designed to support multiple application-layer clients sharing the same identity, encryption, and access-control infrastructure. Each client defines its own namespace within the manifest and its own metadata schema.
 
 ### 16.2 Adding a New Client
 
@@ -1353,7 +1406,7 @@ Each client defines its own JSON schema for metadata. For encrypted posts the me
 
 ### 16.4 Example Client Schemas
 
-**orbitstagram** (photo/video sharing):
+**cipherframe** (photo/video sharing):
 ```json
 {
   "caption": "Sunset at the beach",
@@ -1365,7 +1418,7 @@ Each client defines its own JSON schema for metadata. For encrypted posts the me
 }
 ```
 
-**orbitdrive** (file storage):
+**ciphervault** (file storage):
 ```json
 {
   "filename": "report.pdf",
@@ -1377,7 +1430,7 @@ Each client defines its own JSON schema for metadata. For encrypted posts the me
 }
 ```
 
-**orbitdocs** (document collaboration):
+**cipherdocs** (document collaboration):
 ```json
 {
   "title": "Project Proposal",
@@ -1392,7 +1445,7 @@ Each client defines its own JSON schema for metadata. For encrypted posts the me
 
 - Client names SHOULD be lowercase and use only `[a-z0-9-]`.
 - To avoid collisions, third-party clients SHOULD use a namespaced format: `orgname-clienttype` (e.g., `acme-photos`).
-- The names `default`, `orbit`, and `system` are RESERVED.
+- The names `default`, `cipher station`, and `system` are RESERVED.
 
 ### 16.6 Client Versioning
 
@@ -1401,7 +1454,7 @@ Clients MAY add a `version` field to their namespace object:
 ```json
 {
   "clients": {
-    "orbitdrive": {
+    "ciphervault": {
       "version": 2,
       "posts": [...]
     }
@@ -1417,7 +1470,7 @@ Clients SHOULD handle older versions gracefully by migrating data in-memory when
 
 ### 17.1 Threat Model
 
-The Orbit protocol is designed to protect against:
+The Cipher Station protocol is designed to protect against:
 
 - **Passive network observers:** All content is encrypted before leaving the station. IPFS peers see only encrypted blobs.
 - **Compromised IPFS nodes:** Content is encrypted at rest. CIDs reveal content existence but not content.
@@ -1465,7 +1518,7 @@ Follow requests targeting the station's own uid MUST be rejected. This prevents 
 
 ### 17.7 Post-Quantum Library Maturity
 
-Orbit's post-quantum primitives are provided by a pluggable backend, selected via the `ORBIT_PQC_BACKEND` environment variable:
+Cipher Station's post-quantum primitives are provided by a pluggable backend, selected via the `CIPHER_PQC_BACKEND` environment variable:
 
 - **`python`** (default fallback) — pure-Python `kyber-py` (ML-KEM-768) and `dilithium-py` (ML-DSA-65). These are NOT constant-time and are self-described as educational. Chosen because they install with no native build (piwheels-friendly on a Raspberry Pi).
 - **`liboqs`** — the Open Quantum Safe C library via the `oqs` binding. **Constant-time and hardened**, but requires a native build (cmake + C compiler).
@@ -1473,7 +1526,7 @@ Orbit's post-quantum primitives are provided by a pluggable backend, selected vi
 
 Both backends implement the same FIPS 203 / FIPS 204 standards with identical key, ciphertext, and signature encodings, so envelopes and signatures are interoperable across backends and the KEM-DEM wire format (Section 6) is backend-independent. A station may switch backends without re-bootstrapping its identity.
 
-In Orbit's trust model, ML-KEM decapsulation and ML-DSA signing happen client-side on the device holding the secret key — never as a server-side oracle that an attacker can repeatedly query — so timing side-channels in the pure-Python backend are low-risk in practice. Implementers whose threat model includes a high-rate timing oracle SHOULD deploy the `liboqs` backend.
+In Cipher Station's trust model, ML-KEM decapsulation and ML-DSA signing happen client-side on the device holding the secret key — never as a server-side oracle that an attacker can repeatedly query — so timing side-channels in the pure-Python backend are low-risk in practice. Implementers whose threat model includes a high-rate timing oracle SHOULD deploy the `liboqs` backend.
 
 ---
 
@@ -1634,7 +1687,7 @@ Maximum retries default to 3 with exponential backoff (1s, 2s, 4s).
 
 ### 19.1 Overview
 
-The `install.sh` script automates the complete setup of an Orbit station on a Raspberry Pi or similar Linux device. It installs all dependencies, configures services, bootstraps identity, and starts the station — producing a fully operational node in a single command.
+The `install.sh` script automates the complete setup of an Cipher Station station on a Raspberry Pi or similar Linux device. It installs all dependencies, configures services, bootstraps identity, and starts the station — producing a fully operational node in a single command.
 
 ### 19.2 Prerequisites
 
@@ -1682,7 +1735,7 @@ Initializes the IPFS repository with the `lowpower` profile (suitable for Raspbe
 
 **Step 6: Python Virtual Environment**
 
-Creates a Python virtual environment at `$ORBIT_DIR/.venv` and installs all dependencies from `requirements.txt`.
+Creates a Python virtual environment at `$CIPHER_DIR/.venv` and installs all dependencies from `requirements.txt`.
 
 **Step 7: Environment Configuration**
 
@@ -1690,11 +1743,11 @@ Copies `.env.example` to `.env` on first run. If Cloudflared is available, autom
 
 **Step 8: Identity Bootstrap**
 
-Calls `orbit_node.identity.load_identity()` which:
+Calls `cipher_station.identity.load_identity()` which:
 1. Generates an ML-KEM-768 keypair and an ML-DSA-65 keypair.
 2. Generates a UUID v4.
-3. Writes `orbit_data/keys/mlkem.bin` (ek + dk) and `orbit_data/keys/mldsa.bin` (pk + sk).
-4. Writes `orbit_data/public.json` with the identity fields.
+3. Writes `cipher_station_data/keys/mlkem.bin` (ek + dk) and `cipher_station_data/keys/mldsa.bin` (pk + sk).
+4. Writes `cipher_station_data/public.json` with the identity fields.
 5. Registers the station as its own follower.
 
 **Step 9: Systemd Services**
@@ -1704,23 +1757,23 @@ Creates and enables three systemd service units:
 | Service | Description | Dependencies |
 |---------|-------------|--------------|
 | `ipfs.service` | IPFS daemon with garbage collection | `network.target` |
-| `orbit.service` | Orbit FastAPI server | `ipfs.service` |
-| `cloudflared-tunnel.service` | Cloudflare Quick Tunnel (optional) | `orbit.service` |
+| `cipherstation.service` | Cipher Station FastAPI server | `ipfs.service` |
+| `cloudflared-tunnel.service` | Cloudflare Quick Tunnel (optional) | `cipherstation.service` |
 
 All services are configured with `Restart=on-failure` for automatic recovery.
 
 **Step 10: Firewall**
 
-Opens the Orbit port (default 8443/tcp) using UFW and force-enables the firewall.
+Opens the Cipher Station port (default 8443/tcp) using UFW and force-enables the firewall.
 
 **Step 11: Service Startup**
 
-Starts IPFS first (with a 3-second delay for initialization), then the Orbit service, then optionally the Cloudflare tunnel.
+Starts IPFS first (with a 3-second delay for initialization), then the Cipher Station service, then optionally the Cloudflare tunnel.
 
 ### 19.5 Post-Installation Output
 
 After installation, the script displays:
-- Service status for IPFS, Orbit, and (optionally) the tunnel
+- Service status for IPFS, Cipher Station, and (optionally) the tunnel
 - The station's **IPFS Peer ID** — the permanent address for IPNS discovery
 - The IPNS URL: `https://ipfs.io/ipns/<peer-id>`
 - LAN access URL
@@ -1732,14 +1785,14 @@ After installation, the script displays:
 After installation, the station's data directory has this structure:
 
 ```
-orbit_data/
+cipher_station_data/
 ├── keys/
 │   ├── mlkem.bin             # ML-KEM-768 keypair (ek 1184 + dk 2400 = 3584 bytes)
 │   └── mldsa.bin             # ML-DSA-65 keypair (pk 1952 + sk 4032 = 5984 bytes)
 ├── public.json               # Public identity document
 ├── manifests/
 │   └── manifest.json         # Local manifest cache
-├── orbit.db                  # SQLite database
+├── cipherstation.db                  # SQLite database
 ├── ssl/
 │   ├── cert.pem              # Self-signed TLS certificate
 │   └── key.pem               # TLS private key
@@ -1774,7 +1827,7 @@ The migration from X25519/SealedBox/HMAC to ML-KEM-768 + ML-DSA-65 is a **hard b
 
 - The `public_key` field and the `keys/private.bin` file are gone, replaced by `mlkem_public_key`/`mldsa_public_key` and the `keys/mlkem.bin`/`keys/mldsa.bin` files.
 - Content envelopes are ML-KEM KEM-DEM blobs (~2324 hex chars), not 160-hex SealedBox blobs.
-- The `x-orbit-hmac` header is replaced by `x-orbit-sig` (base64 ML-DSA signature).
+- The `x-cipher-hmac` header is replaced by `x-cipher-sig` (base64 ML-DSA signature).
 
 Clients MUST implement ML-KEM envelope opening (Section 6.3) and ML-DSA request signing (Section 12) to interoperate. There is no fallback to the legacy scheme.
 
@@ -1872,24 +1925,24 @@ CREATE TABLE pairing_sessions (
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `ORBIT_PORT` | `8443` | HTTPS port for the Orbit station API |
-| `ORBIT_HOST` | `0.0.0.0` | Bind address for the station server |
-| `ORBIT_PASSWORD` | _(empty)_ | Optional password to encrypt the secret-key files (`mlkem.bin`, `mldsa.bin`) at rest (Argon2i) |
-| `ORBIT_PQC_BACKEND` | `auto` | PQC backend: `auto` (liboqs if available+self-test passes, else python), `liboqs` (constant-time, requires `oqs`), or `python` (pure-Python) |
+| `CIPHER_PORT` | `8443` | HTTPS port for the Cipher Station station API |
+| `CIPHER_HOST` | `0.0.0.0` | Bind address for the station server |
+| `CIPHER_PASSWORD` | _(empty)_ | Optional password to encrypt the secret-key files (`mlkem.bin`, `mldsa.bin`) at rest (Argon2i) |
+| `CIPHER_PQC_BACKEND` | `auto` | PQC backend: `auto` (liboqs if available+self-test passes, else python), `liboqs` (constant-time, requires `oqs`), or `python` (pure-Python) |
 | `IPFS_API_URL` | `http://127.0.0.1:5001` | IPFS daemon HTTP API URL |
 | `IPFS_TIMEOUT` | `30` | Default timeout (seconds) for IPFS operations |
 | `IPFS_MAX_RETRIES` | `3` | Maximum retry attempts for transient IPFS errors |
-| `ORBIT_BASE_DIR` | `<project>/orbit_data` | Root directory for station data. Defaults to a folder next to `run.py`; relative values are resolved against the project directory (not the cwd), absolute values are used as-is. |
-| `SSL_CERTFILE` | `./orbit_data/ssl/cert.pem` | Path to TLS certificate |
-| `SSL_KEYFILE` | `./orbit_data/ssl/key.pem` | Path to TLS private key |
+| `CIPHER_BASE_DIR` | `<project>/cipher_station_data` | Root directory for station data. Defaults to a folder next to `run.py`; relative values are resolved against the project directory (not the cwd), absolute values are used as-is. |
+| `SSL_CERTFILE` | `./cipher_station_data/ssl/cert.pem` | Path to TLS certificate |
+| `SSL_KEYFILE` | `./cipher_station_data/ssl/key.pem` | Path to TLS private key |
 | `MAX_UPLOAD_SIZE` | `104857600` (100 MB) | Maximum upload size for post content |
 | `CORS_ORIGINS` | `*` | Allowed CORS origins |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
 | `CLOUDFLARE_TUNNEL_ENABLED` | `false` | Enable Cloudflare Quick Tunnel integration |
 | `CLOUDFLARE_METRICS_PORT` | `40469` | Port for cloudflared's metrics/quicktunnel endpoint |
-| `ORBIT_MAX_DEVICES_PER_FOLLOWER` | `20` | Maximum devices per follower uid |
-| `ORBIT_AUTO_REWRAP_ON_FOLLOW_CHANGE` | `1` | Enable auto-rewrap when followers change (`0` to disable) |
-| `ORBIT_BACKUP_DEST` | _(empty)_ | Destination dir for `orbit_node.backup create` and the backup timer; blank → auto-detect a mounted USB drive |
+| `CIPHER_MAX_DEVICES_PER_FOLLOWER` | `20` | Maximum devices per follower uid |
+| `CIPHER_AUTO_REWRAP_ON_FOLLOW_CHANGE` | `1` | Enable auto-rewrap when followers change (`0` to disable) |
+| `CIPHER_BACKUP_DEST` | _(empty)_ | Destination dir for `cipher_station.backup create` and the backup timer; blank → auto-detect a mounted USB drive |
 | `MAX_SKEW_SECONDS` | `60` | Maximum clock skew for authenticated requests |
 | `NONCE_TTL_SECONDS` | `86400` | How long to retain nonces (24 hours) |
 | `PIN_LEN` | `6` | Length of pairing PIN |
@@ -1900,17 +1953,17 @@ CREATE TABLE pairing_sessions (
 
 ## Appendix C: Backup Archive Format
 
-A station's recoverable state spans `orbit_data/` **and** the IPFS repo (content
+A station's recoverable state spans `cipher_station_data/` **and** the IPFS repo (content
 bytes + the node identity that determines the permanent peer ID / IPNS address).
-`orbit_node.backup` packages all of it into a single portable archive so a fresh
+`cipher_station.backup` packages all of it into a single portable archive so a fresh
 `install.sh --restore` reproduces the station byte-for-byte (same peer ID, same
 keys, same posts).
 
 ### D.1 Filename
 
 ```
-orbit-backup-<peerid8>-<UTCstamp>.tar.gz        # plaintext
-orbit-backup-<peerid8>-<UTCstamp>.tar.gz.enc    # passphrase-encrypted
+cipherstation-backup-<peerid8>-<UTCstamp>.tar.gz        # plaintext
+cipherstation-backup-<peerid8>-<UTCstamp>.tar.gz.enc    # passphrase-encrypted
 ```
 
 `<peerid8>` is the first 8 chars of the IPFS peer ID (or `noipfs`); `<UTCstamp>`
@@ -1922,16 +1975,16 @@ at-rest scheme of Section 4.4 (16-byte salt + Argon2i-derived SecretBox).
 | Member | Description |
 |--------|-------------|
 | `backup.json` | Metadata (see D.3) |
-| `orbit_data/keys/mlkem.bin`, `orbit_data/keys/mldsa.bin` | Secret-key files, copied as-is (still ORBIT_PASSWORD-encrypted if that was set) |
-| `orbit_data/public.json` | Public identity document |
-| `orbit_data/orbit.db` | Consistent SQLite snapshot taken via the backup API (WAL-safe) |
-| `orbit_data/manifests/manifest.json` | The manifest |
+| `cipher_station_data/keys/mlkem.bin`, `cipher_station_data/keys/mldsa.bin` | Secret-key files, copied as-is (still CIPHER_PASSWORD-encrypted if that was set) |
+| `cipher_station_data/public.json` | Public identity document |
+| `cipher_station_data/cipherstation.db` | Consistent SQLite snapshot taken via the backup API (WAL-safe) |
+| `cipher_station_data/manifests/manifest.json` | The manifest |
 | `env` | The project `.env` (config that pairs with the keys) |
 | `ipfs_identity.json` | `{"PeerID","PrivKey"}` read from the IPFS repo `config` `Identity` |
 | `content/<cid>.car` | One CAR file per recursively-pinned IPFS root |
 | `pinned_roots.txt` | Newline-separated root CIDs to re-pin on restore |
 
-Excluded: `orbit_data/ssl/` (regenerated on first run) and the derived plaintext
+Excluded: `cipher_station_data/ssl/` (regenerated on first run) and the derived plaintext
 graph dumps. Any member that does not exist on the source station is simply
 omitted (and absent from `backup.json.contents`).
 
@@ -1940,24 +1993,24 @@ omitted (and absent from `backup.json.contents`).
 ```json
 {
   "schema_version": 1,
-  "tool": "orbit-backup",
+  "tool": "cipherstation-backup",
   "created_at": "<ISO 8601 UTC>",
   "peer_id": "<ipfs peer id | null>",
   "uid": "<station uid | null>",
   "encrypted": false,
   "pinned_root_count": 12,
-  "contents": ["orbit_data/keys/mlkem.bin", "..."],
-  "sha256": { "orbit_data/keys/mlkem.bin": "<hex>", "...": "..." }
+  "contents": ["cipher_station_data/keys/mlkem.bin", "..."],
+  "sha256": { "cipher_station_data/keys/mlkem.bin": "<hex>", "...": "..." }
 }
 ```
 
 ### D.4 Restore semantics
 
-A restorer MUST: validate `schema_version`; lay `orbit_data/` and `env` back into
+A restorer MUST: validate `schema_version`; lay `cipher_station_data/` and `env` back into
 the project; ensure an IPFS repo exists and set `Identity.PeerID`/`Identity.PrivKey`
 from `ipfs_identity.json`; `dag import` every `content/*.car`; and `pin add` each
 CID in `pinned_roots.txt`. Restore is offline-capable (uses the `ipfs` CLI against
-the repo, no daemon required) and refuses to overwrite a populated `orbit_data/`
+the repo, no daemon required) and refuses to overwrite a populated `cipher_station_data/`
 unless forced. See Section 5.2 for key-file layout and Section 4.4 for the
 encryption wrapper.
 

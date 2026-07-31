@@ -1,15 +1,15 @@
-# orbit_node/graph.py
+# cipher_station/graph.py
 
 import json
 import uuid
 from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
 
-from orbit_node.config import PUBLIC_JSON_PATH, BASE_DIR
-from orbit_node.ipfs_client import ipfs_add_bytes, publish_public_json_to_ipns
-from orbit_node.followers import list_followers
-from orbit_node.following import list_following
-from orbit_node.envelopes import encrypt_key_for_follower
+from cipher_station.config import PUBLIC_JSON_PATH, BASE_DIR
+from cipher_station.ipfs_client import ipfs_add_bytes, publish_public_json_to_ipns
+from cipher_station.followers import list_followers
+from cipher_station.following import list_following
+from cipher_station.envelopes import encrypt_key_for_follower
 
 
 # ---------------------------------------------------------
@@ -40,7 +40,7 @@ def rebuild_graphs_and_envelopes():
       - followers_cid
       - follow_decoder_envelopes_cid
 
-    AND writes unencrypted versions to /orbit_data/ for local inspection.
+    AND writes unencrypted versions to /cipher_station_data/ for local inspection.
     """
 
     # 1. Generate a new symmetric key

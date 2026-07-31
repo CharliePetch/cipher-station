@@ -1,14 +1,14 @@
 """
 Content envelopes: wrap a post's symmetric key to a recipient's public key.
 
-Post-quantum (ML-KEM-768) via orbit_node.pqcrypto. A recipient "public key" here
+Post-quantum (ML-KEM-768) via cipher_station.pqcrypto. A recipient "public key" here
 is an ML-KEM-768 encapsulation key (hex, 2368 chars). The wire format is the
 length-prefixed KEM-DEM envelope produced by pqcrypto.seal_key.
 """
 
 import logging
 
-from orbit_node import pqcrypto
+from cipher_station import pqcrypto
 
 logger = logging.getLogger(__name__)
 

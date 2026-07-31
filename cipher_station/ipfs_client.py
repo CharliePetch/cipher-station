@@ -1,11 +1,11 @@
-# orbit_node/ipfs_client.py
+# cipher_station/ipfs_client.py
 
 import logging
 import time
 
 import requests
 
-from orbit_node.config import IPFS_API, IPFS_TIMEOUT, IPFS_MAX_RETRIES
+from cipher_station.config import IPFS_API, IPFS_TIMEOUT, IPFS_MAX_RETRIES
 
 logger = logging.getLogger(__name__)
 
@@ -171,16 +171,22 @@ def ipfs_get_bytes(cid: str) -> bytes:
 # IPNS
 # ---------------------------------------------------------------------------
 
-def ipfs_name_publish(cid: str, lifetime: str = "720h") -> dict:
+def ipfs_name_publish(cid: str, lifetime: str = "720h", ttl: str = "1m0s") -> dict:
     """
     Publish a CID to IPNS under this node's peer ID (the 'self' key).
     Returns {"Name": "<peer-id>", "Value": "/ipfs/<cid>"}.
     Uses a longer timeout because IPNS DHT publishing is slow.
+
+    `ttl` is the record's caching hint: a short TTL (1m) tells gateways and
+    delegated routers to re-resolve sooner, reducing how long a stale record is
+    served after the endpoint rotates. It is independent of `lifetime` (the
+    record's validity window), which stays long so the record survives the node
+    being offline.
     """
     def _post():
         r = requests.post(
             f"{IPFS_API}/api/v0/name/publish",
-            params={"arg": cid, "lifetime": lifetime},
+            params={"arg": cid, "lifetime": lifetime, "ttl": ttl},
             timeout=60,
         )
         r.raise_for_status()
@@ -224,6 +230,33 @@ def ipfs_id() -> dict:
     return _with_retry(_post)
 
 
+def ipfs_self_ipns_name() -> str | None:
+    """
+    This node's IPNS name in base36 CIDv1 (``k51…``) form.
+
+    This is the encoding public subdomain gateways accept verbatim
+    (``https://<name>.ipns.dweb.link``); the base58 peer id (``12D3KooW…``)
+    is not a valid DNS label and 500s there. Returned so the client can use the
+    name directly for endpoint recovery without any base conversion.
+    """
+    def _post():
+        r = requests.post(
+            f"{IPFS_API}/api/v0/key/list?l=true&ipns-base=base36",
+            timeout=IPFS_TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    try:
+        data = _with_retry(_post)
+        for key in data.get("Keys", []):
+            if key.get("Name") == "self":
+                return key.get("Id")
+    except Exception as exc:
+        logger.debug("Could not fetch base36 IPNS name: %s", exc)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # public.json → IPFS + IPNS (shared helper)
 # ---------------------------------------------------------------------------
@@ -237,7 +270,7 @@ def publish_public_json_to_ipns() -> str | None:
     so that the IPNS record always points to the latest state.
     """
     import json
-    from orbit_node.config import PUBLIC_JSON_PATH
+    from cipher_station.config import PUBLIC_JSON_PATH
 
     try:
         if not PUBLIC_JSON_PATH.exists():
@@ -246,15 +279,24 @@ def publish_public_json_to_ipns() -> str | None:
 
         obj = json.loads(PUBLIC_JSON_PATH.read_text())
 
-        # Ensure IPFS peer ID is current
+        # Ensure IPFS identity fields are current: the base58 peer id, plus the
+        # base36 IPNS name (k51…) that the client uses for endpoint recovery
+        # (directly usable on public gateways — no base conversion needed).
         try:
             node_info = ipfs_id()
             peer_id = node_info.get("ID")
+            ipns_name = ipfs_self_ipns_name()
+            changed = False
             if peer_id and obj.get("ipfs_peer_id") != peer_id:
                 obj["ipfs_peer_id"] = peer_id
+                changed = True
+            if ipns_name and obj.get("ipns_name") != ipns_name:
+                obj["ipns_name"] = ipns_name
+                changed = True
+            if changed:
                 PUBLIC_JSON_PATH.write_text(json.dumps(obj, indent=2))
         except Exception as exc:
-            logger.debug("Could not fetch IPFS peer ID: %s", exc)
+            logger.debug("Could not refresh IPFS identity fields: %s", exc)
 
         # Publish to IPFS
         public_json_bytes = json.dumps(obj, indent=2).encode("utf-8")

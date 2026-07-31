@@ -6,28 +6,33 @@ import json
 import hashlib
 import logging
 
-from orbit_node.config import ensure_directories, MAX_UPLOAD_SIZE, CORS_ORIGINS
-from orbit_node.inbox import process_inbox_message
-from orbit_node.rewrap import handle_rewrap_request
+from cipher_station.config import ensure_directories, MAX_UPLOAD_SIZE, CORS_ORIGINS
+from cipher_station.inbox import process_inbox_message
+from cipher_station.rewrap import handle_rewrap_request
 
-from orbit_node.posts import handle_new_post, handle_reshare_post
-from orbit_node.manifest import remove_post_from_manifest
-from orbit_node.profile import get_public_profile
-from orbit_node.following import follow_user, unfollow_user
-from orbit_node.graph import rebuild_graphs_and_envelopes
-from orbit_node.database import get_db
-from orbit_node.identity import get_identity
-from orbit_node.followers import (
+from cipher_station.posts import handle_new_post, handle_reshare_post
+from cipher_station.manifest import remove_post_from_manifest
+from cipher_station.profile import (
+    get_public_profile,
+    update_profile_fields,
+    set_avatar_cid,
+)
+from cipher_station.privacy import flip_account_privacy
+from cipher_station.following import follow_user, unfollow_user, list_following
+from cipher_station.graph import rebuild_graphs_and_envelopes
+from cipher_station.database import get_db
+from cipher_station.identity import get_identity
+from cipher_station.followers import (
     add_follower_device,
     list_followers,
     approve_follower,
     list_pending_followers,
     remove_follower,
 )
-from orbit_node.rewrap_envelopes import rewrap_all_posts
-from orbit_node.pairing import create_pairing_session, confirm_pairing_session, PairingThrottled
-from orbit_node.auth import require_delegate, require_owner
-from orbit_node.tunnel import start_tunnel_monitor
+from cipher_station.rewrap_envelopes import rewrap_all_posts
+from cipher_station.pairing import create_pairing_session, confirm_pairing_session, PairingThrottled
+from cipher_station.auth import require_delegate, require_owner
+from cipher_station.tunnel import start_tunnel_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +61,7 @@ class RewrapMessage(BaseModel):
     post_cid: str
     envelopes_cid: str | None = None
 
-app = FastAPI(title="Orbit Node", version="1.0.0")
+app = FastAPI(title="Cipher Station Node", version="1.0.0")
 
 # --------------------------------------------
 # CORS
@@ -99,6 +104,26 @@ def startup():
     ensure_directories()
     get_db()
 
+    # One-time migration: relocate client-profile fields that older builds wrote
+    # into public.json over to the manifest (clients.cipherframe.profile). Runs
+    # BEFORE get_identity() below strips them from public.json.
+    try:
+        from cipher_station.config import PUBLIC_JSON_PATH
+        from cipher_station import manifest as _mf
+        from cipher_station.profile import PROFILE_CLIENT
+        if PUBLIC_JSON_PATH.exists():
+            raw = json.loads(PUBLIC_JSON_PATH.read_text())
+            legacy = {k: raw[k] for k in _mf.CLIENT_PROFILE_FIELDS
+                      if k in raw and raw[k] is not None}
+            if legacy:
+                existing = _mf.get_client_profile(client=PROFILE_CLIENT)
+                seed = {k: v for k, v in legacy.items() if k not in existing}
+                if seed:
+                    _mf.set_client_profile(seed, client=PROFILE_CLIENT)
+                    logger.info("Migrated profile fields public.json -> manifest: %s", sorted(seed))
+    except Exception as exc:
+        logger.warning("Profile migration skipped: %s", exc)
+
     ident = get_identity()
     pub_json = ident.public_json
     uid = pub_json["uid"]
@@ -137,7 +162,7 @@ def health_check():
         logger.error(f"Health check DB failed: {e}")
 
     try:
-        from orbit_node.ipfs_client import ipfs_add_bytes
+        from cipher_station.ipfs_client import ipfs_add_bytes
         ipfs_add_bytes(b"health")
         checks["ipfs"] = True
     except Exception as e:
@@ -166,9 +191,9 @@ def storage_info():
     and computed percentages.
     """
     import shutil
-    from orbit_node.ipfs_client import ipfs_repo_stat, ipfs_object_stat
-    from orbit_node.manifest import load_manifest
-    from orbit_node.config import BASE_DIR
+    from cipher_station.ipfs_client import ipfs_repo_stat, ipfs_object_stat
+    from cipher_station.manifest import load_manifest
+    from cipher_station.config import BASE_DIR
 
     result = {}
 
@@ -191,7 +216,7 @@ def storage_info():
         logger.error(f"Failed to get IPFS repo stat: {e}")
         result["ipfs"] = {"error": str(e)}
 
-    # Device disk stats (partition where orbit_data lives)
+    # Device disk stats (partition where cipher_station_data lives)
     try:
         disk = shutil.disk_usage(BASE_DIR)
         disk_pct = round((disk.used / disk.total) * 100, 2) if disk.total > 0 else 0
@@ -282,15 +307,27 @@ def create_post(
     client: str = Form(None),
     audience_mode: str = Form("all"),
     audience_uids: str = Form(None),
+    self_envelope: str = Form(None),
 ):
+    # Non-public posts MUST arrive already encrypted: `file` is SecretBox
+    # ciphertext, `metadata` (if any) is already-encrypted hex, and
+    # self_envelope is that post's symmetric key ML-KEM-sealed to the
+    # station's own public key. The station never receives plaintext content
+    # or a key sent outside a post-quantum-wrapped channel — see posts.py.
+    if audience_mode != "public" and not self_envelope:
+        raise HTTPException(status_code=400, detail="self_envelope is required for non-public posts")
+
     file_bytes = file.file.read()
 
     metadata_obj = None
     if metadata:
-        try:
-            metadata_obj = json.loads(metadata)
-        except Exception as e:
-            logger.warning(f"Invalid metadata JSON: {e}")
+        if audience_mode == "public":
+            try:
+                metadata_obj = json.loads(metadata)
+            except Exception as e:
+                logger.warning(f"Invalid metadata JSON: {e}")
+        else:
+            metadata_obj = metadata  # already-encrypted hex, stored as-is
 
     # Parse audience_uids from JSON string if provided
     parsed_audience_uids = None
@@ -300,13 +337,17 @@ def create_post(
         except Exception:
             parsed_audience_uids = [u.strip() for u in audience_uids.split(",") if u.strip()]
 
-    return handle_new_post(
-        file_bytes,
-        metadata=metadata_obj,
-        client=client,
-        audience_mode=audience_mode,
-        audience_uids=parsed_audience_uids,
-    )
+    try:
+        return handle_new_post(
+            file_bytes,
+            metadata=metadata_obj,
+            client=client,
+            audience_mode=audience_mode,
+            audience_uids=parsed_audience_uids,
+            self_envelope=self_envelope,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ---------------------------------------------------------
@@ -361,6 +402,85 @@ def share_post(req: SharePostRequest, delegate=Depends(require_owner)):
 @app.get("/profile")
 def profile():
     return get_public_profile()
+
+
+# ---------------------------------------------------------
+# UPDATE PROFILE (owner-only)
+# ---------------------------------------------------------
+class ProfileUpdateRequest(BaseModel):
+    display_name: str | None = None
+    username: str | None = None
+    bio: str | None = None
+    link: str | None = None
+
+
+@app.post("/profile/update")
+def profile_update(req: ProfileUpdateRequest, owner=Depends(require_owner)):
+    # Only update keys the client actually sent (omit unset fields, so a missing
+    # key is "leave unchanged" while an explicit "" clears the field).
+    provided = req.model_dump(exclude_unset=True)
+    try:
+        prof = update_profile_fields(**provided)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "profile_updated", "profile": prof}
+
+
+# ---------------------------------------------------------
+# UPDATE AVATAR (owner-only)
+# ---------------------------------------------------------
+@app.post("/profile/avatar")
+def profile_avatar(
+    owner=Depends(require_owner),
+    file: UploadFile = File(...),
+):
+    from cipher_station.ipfs_client import ipfs_add_bytes
+
+    file_bytes = file.file.read()
+    avatar_cid = ipfs_add_bytes(file_bytes)  # PLAINTEXT/public blob
+    set_avatar_cid(avatar_cid)
+    return {"status": "avatar_updated", "avatar_cid": avatar_cid}
+
+
+# ---------------------------------------------------------
+# LIST FOLLOWING (owner-only)
+# ---------------------------------------------------------
+@app.get("/following")
+def api_list_following(owner=Depends(require_owner)):
+    rows = list_following()
+    following = [
+        {
+            "uid": r.get("uid"),
+            "endpoint": r.get("endpoint"),
+            "ipns_id": r.get("ipns_id"),
+            "mlkem_public_key": r.get("mlkem_public_key"),
+            "mldsa_public_key": r.get("mldsa_public_key"),
+        }
+        for r in rows
+    ]
+    return {"status": "ok", "following": following}
+
+
+# ---------------------------------------------------------
+# PRIVACY FLIP (owner-only)
+# ---------------------------------------------------------
+class PrivacyFlipRequest(BaseModel):
+    mode: str
+    audience_mode: str = "all"
+    audience_uids: list[str] | None = None
+    client: str = "cipherframe"
+
+
+@app.post("/privacy/flip")
+def privacy_flip(req: PrivacyFlipRequest, owner=Depends(require_owner)):
+    if req.mode not in ("private", "public"):
+        raise HTTPException(status_code=400, detail="mode must be 'private' or 'public'")
+    return flip_account_privacy(
+        req.mode,
+        audience_mode=req.audience_mode,
+        audience_uids=req.audience_uids,
+        client=req.client,
+    )
 
 
 # ---------------------------------------------------------

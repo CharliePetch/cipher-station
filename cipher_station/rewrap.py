@@ -1,15 +1,15 @@
-# orbit_node/rewrap.py
+# cipher_station/rewrap.py
 
 import json
 from typing import Optional, Tuple, Dict
 
 from nacl.secret import SecretBox
 
-from orbit_node import pqcrypto
-from orbit_node.manifest import load_manifest
-from orbit_node.ipfs_client import ipfs_get_bytes
-from orbit_node.envelopes import open_envelope, encrypt_key_for_follower
-from orbit_node.followers import list_follower_devices
+from cipher_station import pqcrypto
+from cipher_station.manifest import load_manifest
+from cipher_station.ipfs_client import ipfs_get_bytes
+from cipher_station.envelopes import open_envelope, encrypt_key_for_follower
+from cipher_station.followers import list_follower_devices
 
 
 def _load_envelopes_map_from_ipfs(envelopes_cid: str) -> Dict[str, str]:

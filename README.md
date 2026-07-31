@@ -1,8 +1,8 @@
-# Orbit
+# Cipher Station
 
 **Self-hosted, post-quantum, end-to-end encrypted content sharing over IPFS.**
 
-Orbit lets you run a personal **station** on a Raspberry Pi (or any Linux box) that publishes encrypted content to IPFS and grants access to followers via cryptographic envelopes. No centralized servers, no platform lock-in — you own your data and your identity.
+Cipher Station lets you run a personal **station** on a Raspberry Pi (or any Linux box) that publishes encrypted content to IPFS and grants access to followers via cryptographic envelopes. No centralized servers, no platform lock-in — you own your data and your identity.
 
 Content access control and device authentication use **NIST post-quantum algorithms** — ML-KEM-768 (FIPS 203) and ML-DSA-65 (FIPS 204) — so traffic captured today cannot be decrypted by a future quantum computer ("harvest now, decrypt later"). You can also publish **public, unencrypted** content for anyone to read.
 
@@ -36,7 +36,7 @@ Each post gets its own random symmetric key. That key is wrapped in a **post-qua
 - **Optional public hosting** — Publish a file unencrypted to IPFS for anyone to fetch via a public gateway — useful for a profile picture, a public document, or a static site asset.
 - **Permanent discovery via IPNS** — Your IPFS Peer ID is your stable address. No DNS, no static IP required.
 - **Zero-config public access** — Optional Cloudflare Quick Tunnel gives you a public HTTPS URL with no port forwarding.
-- **Multi-client architecture** — One identity, many apps. Photo sharing (orbitstagram), file storage (orbitdrive), and more — all sharing the same encryption and social graph.
+- **Multi-client architecture** — One identity, many apps. Photo sharing (cipherframe), file storage (ciphervault), and more — all sharing the same encryption and social graph.
 - **Device pairing** — Pair your phone or laptop as a delegate device via 6-digit PIN. Access your content from anywhere.
 - **Encrypted social graph** — Your follower and following lists are encrypted before being published to IPFS.
 - **One-click install** — Single script sets up everything on a Raspberry Pi: IPFS, Python, systemd services, firewall, identity.
@@ -46,8 +46,8 @@ Each post gets its own random symmetric key. That key is wrapped in a **post-qua
 ### Raspberry Pi (Recommended)
 
 ```bash
-git clone https://github.com/your-username/orbit.git
-cd orbit
+git clone https://github.com/your-username/cipher station.git
+cd cipher station
 chmod +x install.sh
 ./install.sh
 ```
@@ -56,7 +56,7 @@ The installer handles everything:
 1. Installs Python 3.11+, IPFS (Kubo), and cloudflared
 2. Creates a Python virtual environment with all dependencies
 3. Bootstraps your cryptographic identity (Curve25519 keypair + UUID)
-4. Configures and starts systemd services (IPFS, Orbit, Cloudflare tunnel)
+4. Configures and starts systemd services (IPFS, Cipher Station, Cloudflare tunnel)
 5. Opens the firewall and prints your Peer ID
 
 After install, your station is live. Share your **Peer ID** with followers — they can always find you at:
@@ -70,8 +70,8 @@ https://ipfs.io/ipns/<your-peer-id>
 ```bash
 # Prerequisites: Python 3.11+, IPFS daemon running on localhost:5001
 
-git clone https://github.com/your-username/orbit.git
-cd orbit
+git clone https://github.com/your-username/cipher station.git
+cd cipher station
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -89,8 +89,8 @@ Copy `.env.example` to `.env` and customize:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ORBIT_PORT` | `8443` | HTTPS port |
-| `ORBIT_PASSWORD` | _(empty)_ | Encrypt your private key at rest |
+| `CIPHER_PORT` | `8443` | HTTPS port |
+| `CIPHER_PASSWORD` | _(empty)_ | Encrypt your private key at rest |
 | `CLOUDFLARE_TUNNEL_ENABLED` | `false` | Enable zero-config public access |
 | `IPFS_API_URL` | `http://127.0.0.1:5001` | Local IPFS daemon |
 | `MAX_UPLOAD_SIZE` | `104857600` | Max upload size (100 MB) |
@@ -102,7 +102,7 @@ See [PROTOCOL.md](PROTOCOL.md) Appendix B for the full configuration reference.
 
 ```
  +-------------------------------------------+
- |  Client Layer (orbitstagram, orbitdrive)   |  App-specific metadata
+ |  Client Layer (cipherframe, ciphervault)   |  App-specific metadata
  +-------------------------------------------+
  |  Manifest Layer                            |  Post index, envelope pointers
  +-------------------------------------------+
@@ -133,11 +133,11 @@ See [PROTOCOL.md](PROTOCOL.md) Appendix B for the full configuration reference.
 
 ML-KEM is a Key Encapsulation Mechanism, so a post's symmetric key is wrapped using the standard **KEM-DEM** construction: encapsulate to the recipient's ML-KEM key, derive a wrapping key from the shared secret with BLAKE2b, and SecretBox-wrap the post key. Device authentication signs the canonical request string with ML-DSA instead of deriving an HMAC key from an (X25519) ECDH.
 
-> **Caveats.** By default the post-quantum primitives use the pure-Python [`kyber-py`](https://pypi.org/project/kyber-py/) and [`dilithium-py`](https://pypi.org/project/dilithium-py/) libraries — chosen because they install with no native build on a Raspberry Pi. They are **not constant-time** and are self-described as educational; in Orbit's model decapsulation and signing happen client-side (never as a server oracle), so timing side-channels are low-risk, but this is not a hardened production crypto stack. For a **constant-time** implementation, install the optional [Open Quantum Safe](https://openquantumsafe.org/) `liboqs` backend (see below). This release is also a **hard breaking change** — there is no migration from older X25519 stations, and every client must implement ML-KEM envelope opening and ML-DSA request signing.
+> **Caveats.** By default the post-quantum primitives use the pure-Python [`kyber-py`](https://pypi.org/project/kyber-py/) and [`dilithium-py`](https://pypi.org/project/dilithium-py/) libraries — chosen because they install with no native build on a Raspberry Pi. They are **not constant-time** and are self-described as educational; in Cipher Station's model decapsulation and signing happen client-side (never as a server oracle), so timing side-channels are low-risk, but this is not a hardened production crypto stack. For a **constant-time** implementation, install the optional [Open Quantum Safe](https://openquantumsafe.org/) `liboqs` backend (see below). This release is also a **hard breaking change** — there is no migration from older X25519 stations, and every client must implement ML-KEM envelope opening and ML-DSA request signing.
 
 #### Optional: constant-time backend (liboqs)
 
-The ML-KEM / ML-DSA math is provided by a pluggable backend, selected with `ORBIT_PQC_BACKEND`:
+The ML-KEM / ML-DSA math is provided by a pluggable backend, selected with `CIPHER_PQC_BACKEND`:
 
 | Value | Backend | Notes |
 |-------|---------|-------|
@@ -149,7 +149,7 @@ Both backends implement the same FIPS standards, so keys, envelopes, and signatu
 
 ```bash
 pip install oqs            # builds/links liboqs; needs cmake + a C compiler
-# then restart with ORBIT_PQC_BACKEND=auto (default) or =liboqs to require it
+# then restart with CIPHER_PQC_BACKEND=auto (default) or =liboqs to require it
 ```
 
 ## API
@@ -168,7 +168,7 @@ pip install oqs            # builds/links liboqs; needs cmake + a C compiler
 
 \* Follow requests are unauthenticated; other inbox message types require a signature.
 
-**Authenticated requests** are signed with the device's **ML-DSA-65** key. The client sends `x-orbit-uid`, `x-orbit-device`, `x-orbit-ts`, `x-orbit-nonce`, `x-orbit-body-sha256`, and `x-orbit-sig` (base64 ML-DSA signature over the canonical string `METHOD\nPATH\nUID\nDEVICE_UID\nTS\nNONCE\nBODY_SHA256`). The station verifies the signature against the device's stored public key; a ±60 s timestamp window and a one-time nonce store prevent replay.
+**Authenticated requests** are signed with the device's **ML-DSA-65** key. The client sends `x-cipher-uid`, `x-cipher-device`, `x-cipher-ts`, `x-cipher-nonce`, `x-cipher-body-sha256`, and `x-cipher-sig` (base64 ML-DSA signature over the canonical string `METHOD\nPATH\nUID\nDEVICE_UID\nTS\nNONCE\nBODY_SHA256`). The station verifies the signature against the device's stored public key; a ±60 s timestamp window and a one-time nonce store prevent replay.
 
 ### Audience modes
 
@@ -191,7 +191,7 @@ https://ipfs.io/ipfs/<post_cid>
 
 ## IPNS Discovery
 
-Every Orbit station publishes its `public.json` to IPNS under its IPFS Peer ID. This creates a **permanent, location-independent address** for your station:
+Every Cipher Station station publishes its `public.json` to IPNS under its IPFS Peer ID. This creates a **permanent, location-independent address** for your station:
 
 ```
 Peer ID (never changes)  -->  IPNS  -->  /ipfs/<CID>  -->  public.json
@@ -206,18 +206,18 @@ This means you can move your Pi to a new network, get a new tunnel URL, or chang
 
 ## Multi-Client Design
 
-Orbit is a protocol, not a single app. Multiple clients share the same identity, encryption, and follower graph:
+Cipher Station is a protocol, not a single app. Multiple clients share the same identity, encryption, and follower graph:
 
 ```json
 {
   "clients": {
-    "orbitstagram": {
+    "cipherframe": {
       "posts": [
         { "post_cid": "Qm...", "audience_mode": "all", "envelopes_cid": "Qm..." },
         { "post_cid": "Qm...", "audience_mode": "public", "encrypted": false, "envelopes_cid": null }
       ]
     },
-    "orbitdrive": {
+    "ciphervault": {
       "posts": [{ "post_cid": "Qm...", "audience_mode": "self", "envelopes_cid": "Qm..." }]
     }
   }
@@ -229,13 +229,13 @@ Building a new client? Pick a name, define your metadata schema, and post to you
 ## Project Structure
 
 ```
-orbit/
+cipher station/
 ├── install.sh              # One-click Raspberry Pi installer
 ├── run.py                  # Entry point (uvicorn + TLS)
 ├── requirements.txt        # Python dependencies
 ├── .env.example            # Configuration template
 ├── PROTOCOL.md             # Full protocol specification
-├── orbit_node/
+├── cipher_station/
 │   ├── main.py             # FastAPI app and routes
 │   ├── pqcrypto.py         # Post-quantum primitives (ML-KEM-768, ML-DSA-65)
 │   ├── identity.py         # PQC keypair generation and loading
@@ -255,11 +255,11 @@ orbit/
 │   ├── config.py           # Configuration loading
 │   ├── backup.py           # USB backup & restore (create/restore CLI)
 │   └── database.py         # SQLite schema
-├── orbit_data/             # Runtime data (created on first run)
+├── cipher_station_data/             # Runtime data (created on first run)
 │   ├── keys/mlkem.bin      # Station ML-KEM-768 keypair (content)
 │   ├── keys/mldsa.bin      # Station ML-DSA-65 keypair (auth)
 │   ├── public.json         # Public identity (uid, mlkem/mldsa public keys)
-│   ├── orbit.db            # SQLite database
+│   ├── cipherstation.db            # SQLite database
 │   └── ssl/                # TLS certificates
 └── tests/                  # Test suite
 ```
@@ -268,13 +268,13 @@ orbit/
 
 ```bash
 # Check status
-sudo systemctl status orbit
+sudo systemctl status cipher station
 
 # View logs
-sudo journalctl -u orbit -f
+sudo journalctl -u cipher station -f
 
 # Restart
-sudo systemctl restart orbit
+sudo systemctl restart cipher station
 
 # View IPFS peer ID
 ipfs id -f='<id>'
@@ -286,7 +286,7 @@ sudo journalctl -u cloudflared-tunnel -f
 ## Backup & Restore
 
 microSD cards fail. A backup captures **everything that makes the station yours** —
-your Orbit keys, the database, the manifest, **and** the IPFS peer identity (your
+your Cipher Station keys, the database, the manifest, **and** the IPFS peer identity (your
 permanent peer ID / IPNS address) plus the pinned post content — into a single
 portable archive on a USB drive, so you can rebuild on a fresh card or box and
 come back at the **same address with the same posts**.
@@ -296,23 +296,23 @@ come back at the **same address with the same posts**.
 Plug in a USB drive, then:
 
 ```bash
-# Auto-detects a mounted USB drive (or set ORBIT_BACKUP_DEST / pass --dest)
-.venv/bin/python -m orbit_node.backup create
+# Auto-detects a mounted USB drive (or set CIPHER_BACKUP_DEST / pass --dest)
+.venv/bin/python -m cipher_station.backup create
 
 # Explicit destination, or encrypt the archive with a passphrase:
-.venv/bin/python -m orbit_node.backup create --dest /media/$USER/MYDRIVE
-.venv/bin/python -m orbit_node.backup create --passphrase 'correct horse battery staple'
+.venv/bin/python -m cipher_station.backup create --dest /media/$USER/MYDRIVE
+.venv/bin/python -m cipher_station.backup create --passphrase 'correct horse battery staple'
 
 # List backups found on the drive
-.venv/bin/python -m orbit_node.backup list
+.venv/bin/python -m cipher_station.backup list
 ```
 
 A **daily backup also runs automatically** whenever a USB drive is mounted, via
-the `orbit-backup.timer` systemd unit the installer sets up (it cleanly no-ops
-when no drive is present). Set a fixed destination with `ORBIT_BACKUP_DEST` in
+the `cipherstation-backup.timer` systemd unit the installer sets up (it cleanly no-ops
+when no drive is present). Set a fixed destination with `CIPHER_BACKUP_DEST` in
 `.env`.
 
-> ⚠️ **Unencrypted backups contain your private keys** (Orbit + the IPFS node
+> ⚠️ **Unencrypted backups contain your private keys** (Cipher Station + the IPFS node
 > key + your `.env`). Keep the drive physically secure, or use `--passphrase`.
 
 ### Restore onto a fresh station
@@ -321,10 +321,10 @@ During install, point `install.sh` at a backup:
 
 ```bash
 ./install.sh --restore                                   # auto-detect a backup on a mounted USB
-./install.sh --restore=/media/<user>/<drive>/orbit-backup-<id>-<ts>.tar.gz
+./install.sh --restore=/media/<user>/<drive>/cipherstation-backup-<id>-<ts>.tar.gz
 ```
 
-Restore reinstates `orbit_data/`, the IPFS peer identity, and the pinned content
+Restore reinstates `cipher_station_data/`, the IPFS peer identity, and the pinned content
 **before** a fresh identity would be generated — so `ipfs id` returns your
 original peer ID and followers can still find you. (If you used a passphrase, it
 will be prompted for.) The archive format is documented in

@@ -2,7 +2,7 @@
 Low-level key material helpers.
 
 Post-quantum key generation and content/auth primitives live in
-`orbit_node.pqcrypto` (ML-KEM-768 + ML-DSA-65). This module keeps only the
+`cipher_station.pqcrypto` (ML-KEM-768 + ML-DSA-65). This module keeps only the
 password-based **encryption-at-rest** wrapper used to protect the station's
 secret key files on disk (Argon2i + SecretBox), which is algorithm-agnostic.
 """

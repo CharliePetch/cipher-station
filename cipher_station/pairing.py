@@ -1,4 +1,4 @@
-# orbit_node/pairing.py
+# cipher_station/pairing.py
 
 import hashlib
 import os
@@ -6,8 +6,8 @@ import secrets
 import time
 from dataclasses import dataclass
 
-from orbit_node import pqcrypto
-from orbit_node.database import get_db
+from cipher_station import pqcrypto
+from cipher_station.database import get_db
 
 PIN_LEN = 6
 TTL_SECONDS = 5 * 60
@@ -30,9 +30,9 @@ MAX_ATTEMPTS = 5
 # pairing for the window. Pairing is an occasional, owner-driven action, so we
 # accept short-lived unavailability over a guessable PIN. Tune via env if needed.
 # ---------------------------------------------------------------------------
-LOCKOUT_WINDOW_SECONDS = int(os.getenv("ORBIT_PAIRING_LOCKOUT_WINDOW", str(15 * 60)))
-GLOBAL_MAX_FAILURES = int(os.getenv("ORBIT_PAIRING_MAX_FAILURES", "25"))
-MAX_PENDING_SESSIONS = int(os.getenv("ORBIT_PAIRING_MAX_PENDING_SESSIONS", "20"))
+LOCKOUT_WINDOW_SECONDS = int(os.getenv("CIPHER_PAIRING_LOCKOUT_WINDOW", str(15 * 60)))
+GLOBAL_MAX_FAILURES = int(os.getenv("CIPHER_PAIRING_MAX_FAILURES", "25"))
+MAX_PENDING_SESSIONS = int(os.getenv("CIPHER_PAIRING_MAX_PENDING_SESSIONS", "20"))
 
 
 class PairingThrottled(Exception):

@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Orbit — macOS menu bar (status bar) app.
+Cipher Station — macOS menu bar (status bar) app.
 
 A lightweight `rumps` app that lives in the macOS menu bar (top-right) and
-surfaces the live state of the local Orbit station:
+surfaces the live state of the local Cipher Station station:
 
   1. Recently generated device-pairing PINs (parsed from the station log)
   2. The current Cloudflare tunnel address (from public.json)
-  3. IPFS storage used + the disk cap dedicated to Orbit, with an edit dialog
+  3. IPFS storage used + the disk cap dedicated to Cipher Station, with an edit dialog
 
 It is a *local, owner-only* tool: it reads local files and shells out to the
 local `ipfs` CLI. It opens no network ports of its own.
 
 Run via launchd (see install-macos.command) or manually:
 
-    .venv/bin/python -m orbit_node.tray
+    .venv/bin/python -m cipher_station.tray
 """
 
 import os
@@ -29,15 +29,15 @@ try:
 except ImportError:  # pragma: no cover - rumps is macOS-only
     raise SystemExit("rumps is required for the menu bar app: pip install rumps")
 
-# Reuse the station's configuration so paths honour .env / ORBIT_BASE_DIR.
-from orbit_node.config import BASE_DIR, PUBLIC_JSON_PATH, ORBIT_PORT
+# Reuse the station's configuration so paths honour .env / CIPHER_BASE_DIR.
+from cipher_station.config import BASE_DIR, PUBLIC_JSON_PATH, CIPHER_PORT
 
 # ---------------------------------------------------------------------------
 # Configuration (overridable via environment, set by the launchd plist)
 # ---------------------------------------------------------------------------
-LOG_PATH = Path(os.getenv("ORBIT_LOG_FILE", str(BASE_DIR / "logs" / "orbit.log")))
-IPFS_BIN = os.getenv("ORBIT_IPFS_BIN", "ipfs")
-IPFS_PATH = os.getenv("IPFS_PATH", str(Path.home() / ".orbit" / "ipfs"))
+LOG_PATH = Path(os.getenv("CIPHER_LOG_FILE", str(BASE_DIR / "logs" / "cipherstation.log")))
+IPFS_BIN = os.getenv("CIPHER_IPFS_BIN", "ipfs")
+IPFS_PATH = os.getenv("IPFS_PATH", str(Path.home() / ".cipherstation" / "ipfs"))
 
 REFRESH_SECONDS = 15
 PIN_LOOKBACK_SECONDS = 30 * 60          # only show PINs from the last 30 minutes
@@ -53,7 +53,7 @@ LOG_TS_FMT = "%Y-%m-%d %H:%M:%S"        # matches config.py logging datefmt
 # ---------------------------------------------------------------------------
 
 def _ipfs(*args, timeout: int = 10):
-    """Run the local ipfs CLI against the Orbit repo. Returns stdout or None."""
+    """Run the local ipfs CLI against the Cipher Station repo. Returns stdout or None."""
     env = dict(os.environ, IPFS_PATH=IPFS_PATH)
     try:
         out = subprocess.run(
@@ -153,7 +153,7 @@ def _set_storage_max(value: str) -> bool:
         # StorageMax is applied at GC time; kickstart the daemon so it re-reads.
         uid = os.getuid()
         subprocess.run(
-            ["launchctl", "kickstart", "-k", f"gui/{uid}/com.orbit.ipfs"],
+            ["launchctl", "kickstart", "-k", f"gui/{uid}/com.cipherstation.ipfs"],
             capture_output=True,
         )
     return ok
@@ -168,7 +168,7 @@ def _tcp_open(host: str, port: int, timeout: float = 1.5) -> bool:
 
 
 def _station_running() -> bool:
-    return _tcp_open("127.0.0.1", ORBIT_PORT)
+    return _tcp_open("127.0.0.1", CIPHER_PORT)
 
 
 def _gateway_addr():
@@ -218,9 +218,9 @@ def _notify(title: str, subtitle: str, message: str):
 # The app
 # ---------------------------------------------------------------------------
 
-class OrbitTray(rumps.App):
+class CipherTray(rumps.App):
     def __init__(self):
-        super().__init__("Orbit", title="🛰", quit_button=None)
+        super().__init__("Cipher Station", title="🛰", quit_button=None)
 
         self.status_item = rumps.MenuItem("Status: checking…")
         self.gateway_item = rumps.MenuItem("IPFS Gateway: …")
@@ -245,7 +245,7 @@ class OrbitTray(rumps.App):
             rumps.MenuItem("Open Data Folder", callback=self._open_data),
             rumps.MenuItem("Restart Station", callback=self._restart_station),
             rumps.MenuItem("Refresh Now", callback=lambda _: self.refresh()),
-            rumps.MenuItem("Quit Orbit", callback=rumps.quit_application),
+            rumps.MenuItem("Quit Cipher Station", callback=rumps.quit_application),
         ]
 
         self._endpoint_cache = None
@@ -318,25 +318,25 @@ class OrbitTray(rumps.App):
     def _copy_url(self, _):
         if self._endpoint_cache:
             _copy(self._endpoint_cache)
-            _notify("Orbit", "Copied", "Cloudflare URL copied to clipboard")
+            _notify("Cipher Station", "Copied", "Cloudflare URL copied to clipboard")
 
     def _copy_peer(self, _):
         if self._peer_cache:
             _copy(self._peer_cache)
-            _notify("Orbit", "Copied", "Peer ID copied to clipboard")
+            _notify("Cipher Station", "Copied", "Peer ID copied to clipboard")
 
     def _copy_pin_factory(self, pin: str):
         def _cb(_):
             _copy(pin)
-            _notify("Orbit", "Copied", f"Pairing PIN {pin} copied")
+            _notify("Cipher Station", "Copied", f"Pairing PIN {pin} copied")
         return _cb
 
     def _edit_storage(self, _):
         _, configured = _read_storage()
         current = configured or "10GB"
         win = rumps.Window(
-            title="Orbit Storage Limit",
-            message="Disk space dedicated to Orbit (the IPFS repo).\n"
+            title="Cipher Station Storage Limit",
+            message="Disk space dedicated to Cipher Station (the IPFS repo).\n"
                     "Examples: 10GB, 50GB, 500GB",
             default_text=current,
             ok="Save",
@@ -351,26 +351,26 @@ class OrbitTray(rumps.App):
             rumps.alert("Invalid size", "Use a value like 10GB or 500GB.")
             return
         if _set_storage_max(value):
-            _notify("Orbit", "Storage updated", f"Orbit limit set to {value}")
+            _notify("Cipher Station", "Storage updated", f"Cipher Station limit set to {value}")
             self._refresh_storage()
         else:
             rumps.alert("Could not update", "Failed to set the IPFS storage limit. "
-                        "Is the ipfs CLI installed and the Orbit repo initialized?")
+                        "Is the ipfs CLI installed and the Cipher Station repo initialized?")
 
     def _restart_station(self, _):
         uid = os.getuid()
         subprocess.run(
-            ["launchctl", "kickstart", "-k", f"gui/{uid}/com.orbit.station"],
+            ["launchctl", "kickstart", "-k", f"gui/{uid}/com.cipherstation.station"],
             capture_output=True,
         )
-        _notify("Orbit", "Restarting", "Station is restarting…")
+        _notify("Cipher Station", "Restarting", "Station is restarting…")
 
     def _open_data(self, _):
         subprocess.run(["open", str(BASE_DIR)], capture_output=True)
 
 
 def main():
-    OrbitTray().run()
+    CipherTray().run()
 
 
 if __name__ == "__main__":

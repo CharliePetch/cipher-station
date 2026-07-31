@@ -7,8 +7,8 @@ from pathlib import Path
 
 import uvicorn
 
-from orbit_node.config import (
-    ORBIT_PORT, ORBIT_HOST, SSL_CERTFILE, SSL_KEYFILE,
+from cipher_station.config import (
+    CIPHER_PORT, CIPHER_HOST, SSL_CERTFILE, SSL_KEYFILE,
     LOG_LEVEL, ensure_directories,
 )
 
@@ -31,7 +31,7 @@ def _ensure_ssl_cert():
             "-keyout", str(key),
             "-out", str(cert),
             "-days", "3650", "-nodes",
-            "-subj", "/CN=orbit-station",
+            "-subj", "/CN=cipherstation",
         ],
         check=True,
         capture_output=True,
@@ -44,9 +44,9 @@ if __name__ == "__main__":
     _ensure_ssl_cert()
 
     uvicorn.run(
-        "orbit_node.main:app",
-        port=ORBIT_PORT,
-        host=ORBIT_HOST,
+        "cipher_station.main:app",
+        port=CIPHER_PORT,
+        host=CIPHER_HOST,
         reload=False,
         ssl_certfile=SSL_CERTFILE,
         ssl_keyfile=SSL_KEYFILE,

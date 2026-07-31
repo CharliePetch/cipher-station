@@ -1,12 +1,12 @@
-# Orbit Client Developer Guide & FAQ
+# Cipher Station Client Developer Guide & FAQ
 
-A practical, opinionated pathway for building a **client** that speaks the Orbit
+A practical, opinionated pathway for building a **client** that speaks the Cipher Station
 protocol — a photo app, a file drive, a CLI, a web reader, anything. It distills
 [PROTOCOL.md](PROTOCOL.md) down to "what do I actually have to implement, and in
 what order." Where you need byte-exact detail, this guide points you at the
 relevant PROTOCOL.md section.
 
-> **Orbit is post-quantum.** Content is wrapped with **ML-KEM-768** (FIPS 203)
+> **Cipher Station is post-quantum.** Content is wrapped with **ML-KEM-768** (FIPS 203)
 > and requests are authenticated with **ML-DSA-65** (FIPS 204). There is **no**
 > X25519/Ed25519 anywhere in the app layer. Your client must use these
 > algorithms; classical NaCl `box`/`sign` will not interoperate.
@@ -24,7 +24,8 @@ relevant PROTOCOL.md section.
 ```
 
 - A **station** is the always-on server (someone's Pi). It holds the root secret
-  keys, runs the HTTP API, and talks to IPFS. It does the *encrypting*.
+  keys, runs the HTTP API, and talks to IPFS. It fans encrypted post keys out to
+  followers/delegates, but it does not encrypt your content — see below.
 - A **client** is your app. It never holds the station's root keys. It has its
   own keypairs and plays one (or both) of two roles:
 
@@ -36,11 +37,27 @@ relevant PROTOCOL.md section.
 Most real apps do **both**: manage the user's own station *and* read the
 stations they follow.
 
-A key consequence: **the station encrypts content, not the client.** When you
-create a post you upload *plaintext* to the station (over TLS) and it produces
-the symmetric key + per-recipient envelopes. Your client's crypto work is mostly
-on the **read** side (opening envelopes, decrypting) plus **signing** your
-authenticated requests.
+A key consequence: **the client encrypts content, not the station.** For any
+`audience_mode` other than `public`, you generate the post's symmetric key,
+encrypt the file and metadata with it, and seal that key to the *station's own*
+ML-KEM public key (a "self_envelope") — all on-device, before anything is sent.
+The station only ever receives ciphertext plus that one small sealed envelope;
+it decapsulates the envelope to recover the key (never the content) so it can
+fan out envelopes to followers. See §4 and §9.
+
+This isn't incidental — it's what makes the "post-quantum" claim actually hold.
+The transport between your client and the station is ordinary HTTPS (classical
+key exchange, not post-quantum). If plaintext content or an unwrapped key ever
+crossed that transport, a party recording the session today could decrypt it
+later once classical key exchange is broken (a "harvest-now-decrypt-later"
+attack) — regardless of how good the *storage*-side crypto is. Encrypting and
+sealing client-side before the request is sent means there is nothing on the
+wire worth harvesting.
+
+Your client's crypto work therefore spans both directions: **sealing** your own
+post keys on write, and **opening** envelopes (yours and, if you build a reader,
+others') plus **decrypting** on read — plus **signing** your authenticated
+requests.
 
 ---
 
@@ -50,9 +67,9 @@ You need standards-conformant implementations of:
 
 | Primitive | Standard | Used for |
 |-----------|----------|----------|
-| **ML-KEM-768** | FIPS 203 | Opening content envelopes (`decaps`); sending follow/pair keys (`keygen`) |
+| **ML-KEM-768** | FIPS 203 | Sealing your own post keys to the station (`encaps`) on every upload; opening content envelopes (`decaps`) on read; sending follow/pair keys (`keygen`) |
 | **ML-DSA-65** | FIPS 204 | Signing your authenticated requests (`sign`) |
-| **XSalsa20-Poly1305** | NaCl `SecretBox` | Decrypting post bodies & metadata; the DEM inside an envelope |
+| **XSalsa20-Poly1305** | NaCl `SecretBox` | Encrypting post bodies & metadata on upload; decrypting on read; the DEM inside an envelope |
 | **BLAKE2b** | RFC 7693 | Deriving the envelope wrap-key (personalized) |
 | **SHA-256** | — | Request body hash |
 | Hex + Base64 | — | Encodings on the wire |
@@ -67,7 +84,7 @@ JS/TS, etc.).
 
 ## 3. Identity: your keys
 
-Every Orbit principal — station, follower, or delegate device — carries **two
+Every Cipher Station principal — station, follower, or delegate device — carries **two
 keypairs** plus a couple of IDs:
 
 | Item | What | Notes |
@@ -111,8 +128,10 @@ wrap_key = BLAKE2b(shared, out_len=32, person="orbit-kem")
 sym_key  = SecretBox(wrap_key).decrypt(sealed)        # 32 bytes
 ```
 
-**Seal an envelope** (only needed if you build envelopes yourself; normally the
-station does this):
+**Seal an envelope** (you MUST do this for every non-`public` post you create —
+see §9 — sealing your fresh `sym_key` to the *station's own* ML-KEM public key
+as `self_envelope`; the station also does this itself when fanning the same key
+out to followers/delegates):
 
 ```text
 shared, kem_ct = ML_KEM_768.encaps(recipient_mlkem_public)
@@ -160,12 +179,12 @@ sig = ML_DSA_65.sign(my_mldsa_secret, utf8(canonical_string))
 
 | Header | Value |
 |--------|-------|
-| `x-orbit-uid` | your `uid` |
-| `x-orbit-device` | your `device_uid` |
-| `x-orbit-ts` | the `TS` you signed |
-| `x-orbit-nonce` | the `NONCE` you signed |
-| `x-orbit-body-sha256` | the lowercase-hex body hash you signed |
-| `x-orbit-sig` | **base64** of `sig` |
+| `x-cipher-uid` | your `uid` |
+| `x-cipher-device` | your `device_uid` |
+| `x-cipher-ts` | the `TS` you signed |
+| `x-cipher-nonce` | the `NONCE` you signed |
+| `x-cipher-body-sha256` | the lowercase-hex body hash you signed |
+| `x-cipher-sig` | **base64** of `sig` |
 
 The station looks up your device's stored ML-DSA public key, recomputes the
 canonical string, and verifies. (See [PROTOCOL.md §12](PROTOCOL.md).)
@@ -174,7 +193,7 @@ canonical string, and verifies. (See [PROTOCOL.md §12](PROTOCOL.md).)
 > sure your HTTP stack allows large request headers.
 
 > **`/rewrap` extra rule:** the body's `uid`/`device_uid` must match your
-> `x-orbit-uid`/`x-orbit-device` headers, or you get 401.
+> `x-cipher-uid`/`x-cipher-device` headers, or you get 401.
 
 ---
 
@@ -251,21 +270,37 @@ recovered keys, and expect a burst after first pairing. (See [PROTOCOL.md §11](
 
 ## 9. Creating, deleting, and resharing posts (owner/delegate)
 
-You upload **plaintext**; the station encrypts and builds envelopes.
+For any `audience_mode` other than `public`, **you encrypt, the station never
+sees plaintext.** Before calling `POST /post`:
+
+```text
+sym_key         = random(32)
+encrypted_file  = SecretBox(sym_key).encrypt(file_bytes)
+metadata_hex    = SecretBox(sym_key).encrypt(compact_json(metadata)).hex()   # if any
+self_envelope   = seal_envelope(sym_key, station_mlkem_public_key)          # see §4
+```
+
+`station_mlkem_public_key` is the station's own ML-KEM public key — captured at
+pairing time (delegates) or read from your own station's identity — not a
+follower's key. The station decapsulates `self_envelope` to recover `sym_key`
+(never the file), then fans out follower/delegate envelopes exactly as it
+always has.
 
 **Create** — `POST /post` (authenticated, `multipart/form-data`):
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `file` | yes | Raw bytes (encrypted by the station unless `audience_mode=public`) |
-| `metadata` | no | A JSON **string** of your client-specific metadata |
+| `file` | yes | For `audience_mode != public`: `encrypted_file` from above. For `public`: raw bytes. |
+| `metadata` | no | For `audience_mode != public`: `metadata_hex` from above. For `public`: a plaintext JSON **string**. |
+| `self_envelope` | yes, if `audience_mode != public` | Hex KEM-DEM envelope from above. Omitting it on a non-`public` post gets you a `400`. |
 | `client` | no | Your client namespace (defaults to `default`) |
 | `audience_mode` | no | `self` \| `specific` \| `all` (default) \| `public` |
 | `audience_uids` | if `specific` | JSON array (or CSV) of follower UIDs |
 
 Returns `{ status, cid, envelopes_cid, audience_mode, ... }`. For
-`audience_mode=public` the file is stored **unencrypted** and readable by anyone
-at `https://<gateway>/ipfs/<cid>`.
+`audience_mode=public` skip all of the above — the file is uploaded and stored
+**unencrypted**, readable by anyone at `https://<gateway>/ipfs/<cid>`; there is
+no `self_envelope` and no key to generate.
 
 **Delete** — `POST /post/delete` `{ post_cid, client? }` (unpins + GC).
 **Reshare** — `POST /post/share` `{ post_cid, audience_mode, audience_uids?, client? }`
@@ -336,11 +371,11 @@ PINs expire in 5 minutes and lock after 5 wrong attempts. (See [PROTOCOL.md §10
 
 ## 13. Multi-client namespacing
 
-Orbit is a protocol, not one app. The manifest is partitioned by **client name**:
+Cipher Station is a protocol, not one app. The manifest is partitioned by **client name**:
 
 ```json
 { "clients": {
-    "orbitstagram": { "posts": [ ... ] },
+    "cipherframe": { "posts": [ ... ] },
     "your-app":     { "posts": [ ... ] }
 } }
 ```
@@ -377,10 +412,13 @@ Full request/response details: [PROTOCOL.md §14](PROTOCOL.md).
 ## 15. FAQ
 
 **Q: Do I have to implement the encryption myself?**
-For *creating* posts, no — you upload plaintext and the station encrypts. For
-*reading*, yes: you must implement envelope opening (ML-KEM decaps → BLAKE2b →
-SecretBox) and post/metadata decryption. You also generate your own keypairs and
-sign your requests.
+Yes, both directions. For *creating* a non-`public` post, you generate the key,
+encrypt the file/metadata, and seal the key to the station's public key
+(§4, §9) — the station never sees plaintext or an un-sealed key. For *reading*,
+you implement envelope opening (ML-KEM decaps → BLAKE2b → SecretBox) and
+post/metadata decryption. You also generate your own keypairs and sign your
+requests. `public` posts are the one exception: no keys, no encryption, plaintext
+both ways.
 
 **Q: Why two keypairs?**
 ML-KEM is a key-encapsulation mechanism (confidentiality) and can't sign; ML-DSA
@@ -389,8 +427,8 @@ so every principal has one of each.
 
 **Q: My request gets `401 bad auth`. Checklist:**
 1. Canonical string is exactly `METHOD\nPATH\nUID\nDEVICE_UID\nTS\nNONCE\nBODY_SHA256`, UTF-8, `METHOD` uppercase, `PATH` exactly as sent.
-2. `x-orbit-body-sha256` is lowercase hex of the **exact** bytes you sent (and the same value you signed).
-3. `x-orbit-sig` is **base64** (not hex) of the signature.
+2. `x-cipher-body-sha256` is lowercase hex of the **exact** bytes you sent (and the same value you signed).
+3. `x-cipher-sig` is **base64** (not hex) of the signature.
 4. You signed with the **ML-DSA** secret whose public key the station has for this `device_uid`.
 
 **Q: `401 stale request`?** Your clock is off by >60 s. Sync it (NTP).
@@ -421,10 +459,10 @@ manifest entry has `"encrypted": false` and plaintext metadata.
 
 1. Add ML-KEM-768, ML-DSA-65, SecretBox, BLAKE2b, SHA-256 to your app.
 2. Generate the user's `uid`, `device_uid`, and both keypairs; store secrets securely.
-3. Implement `open_envelope` (§4) and the request signer (§5). Unit-test both.
+3. Implement `open_envelope` AND `seal_envelope` (§4) and the request signer (§5). Unit-test all three.
 4. **Read path:** profile → manifest → decrypt posts in your namespace (§7).
 5. **Follow path:** send a follow request to stations you want to read (§11).
-6. **Owner path (optional):** pair the device (§12), then create/manage posts (§9) and follows (§10).
+6. **Owner path (optional):** pair the device (§12), then create/manage posts (§9, including client-side pre-upload encryption) and follows (§10).
 7. For owner devices, add the `/rewrap` step to read your own content (§8).
 
 When in doubt about an exact byte, defer to [PROTOCOL.md](PROTOCOL.md) — it's the

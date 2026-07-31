@@ -4,8 +4,8 @@ import time
 
 import pytest
 
-from orbit_node.auth import _canonical
-from orbit_node import pqcrypto
+from cipher_station.auth import _canonical
+from cipher_station import pqcrypto
 
 
 class TestCanonicalString:
@@ -54,7 +54,7 @@ class TestMLDSASignVerify:
 
 class TestNonceReplay:
     def test_nonce_seen_and_remember(self):
-        from orbit_node.auth import _nonce_seen, _remember_nonce
+        from cipher_station.auth import _nonce_seen, _remember_nonce
 
         uid, dev, nonce = "user1", "device1", "unique-nonce-123"
         ts = int(time.time())
@@ -64,7 +64,7 @@ class TestNonceReplay:
         assert _nonce_seen(uid, dev, nonce)
 
     def test_different_nonce_not_seen(self):
-        from orbit_node.auth import _nonce_seen, _remember_nonce
+        from cipher_station.auth import _nonce_seen, _remember_nonce
 
         uid, dev = "user1", "device1"
         _remember_nonce(uid, dev, "nonce-A", int(time.time()))

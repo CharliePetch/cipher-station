@@ -1,7 +1,7 @@
-# orbit_node/following.py
+# cipher_station/following.py
 
 from typing import Dict, List
-from orbit_node.database import get_db
+from cipher_station.database import get_db
 
 
 def follow_user(uid: str, mlkem_public_key: str, endpoint: str,

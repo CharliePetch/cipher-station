@@ -1,25 +1,25 @@
-# orbit_node/inbox.py
+# cipher_station/inbox.py
 
 import logging
 import os
 
-from orbit_node import pqcrypto
-from orbit_node.identity import get_identity
+from cipher_station import pqcrypto
+from cipher_station.identity import get_identity
 
 logger = logging.getLogger(__name__)
-from orbit_node.followers import (
+from cipher_station.followers import (
     add_follower_device,
     list_follower_devices,
 )
-from orbit_node.rewrap_envelopes import rewrap_all_posts
+from cipher_station.rewrap_envelopes import rewrap_all_posts
 
 
 # -----------------------------
 # Safety knobs (dev-friendly)
 # -----------------------------
-MAX_DEVICES_PER_FOLLOWER = int(os.getenv("ORBIT_MAX_DEVICES_PER_FOLLOWER", "20"))
+MAX_DEVICES_PER_FOLLOWER = int(os.getenv("CIPHER_MAX_DEVICES_PER_FOLLOWER", "20"))
 # If set to "0", disables expensive rewrap_all_posts on follow changes (handy in dev)
-AUTO_REWRAP_ON_FOLLOW_CHANGE = os.getenv("ORBIT_AUTO_REWRAP_ON_FOLLOW_CHANGE", "1") != "0"
+AUTO_REWRAP_ON_FOLLOW_CHANGE = os.getenv("CIPHER_AUTO_REWRAP_ON_FOLLOW_CHANGE", "1") != "0"
 
 # ---------------------------------------------------------------------------
 # DEV-ONLY: auto-accept inbound follow requests.
@@ -32,15 +32,15 @@ AUTO_REWRAP_ON_FOLLOW_CHANGE = os.getenv("ORBIT_AUTO_REWRAP_ON_FOLLOW_CHANGE", "
 #
 # Default OFF (fail-closed): follow requests are recorded as "Pending" and the
 # owner must approve them (POST /followers/approve) before any access is granted.
-# Set ORBIT_DEV_AUTO_ACCEPT_FOLLOWS=1 to restore the old auto-accept behavior.
+# Set CIPHER_DEV_AUTO_ACCEPT_FOLLOWS=1 to restore the old auto-accept behavior.
 # ---------------------------------------------------------------------------
 DEV_AUTO_ACCEPT_FOLLOWS = os.getenv(
-    "ORBIT_DEV_AUTO_ACCEPT_FOLLOWS", "0"
+    "CIPHER_DEV_AUTO_ACCEPT_FOLLOWS", "0"
 ).strip().lower() in ("1", "true", "yes", "on")
 
 if DEV_AUTO_ACCEPT_FOLLOWS:
     logger.warning(
-        "ORBIT_DEV_AUTO_ACCEPT_FOLLOWS is ON — inbound follow requests are "
+        "CIPHER_DEV_AUTO_ACCEPT_FOLLOWS is ON — inbound follow requests are "
         "auto-approved and granted content access. Do NOT use this in production."
     )
 

@@ -13,27 +13,27 @@ load_dotenv()
 # current working directory. This makes the station's data location stable no
 # matter where the process is launched from or what systemd sets as the cwd.
 #
-#   - ORBIT_BASE_DIR unset            -> <project>/orbit_data
-#   - ORBIT_BASE_DIR set (absolute)   -> used as-is
-#   - ORBIT_BASE_DIR set (relative)   -> resolved against <project>, not cwd
+#   - CIPHER_BASE_DIR unset            -> <project>/cipher_station_data
+#   - CIPHER_BASE_DIR set (absolute)   -> used as-is
+#   - CIPHER_BASE_DIR set (relative)   -> resolved against <project>, not cwd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-_base_dir_env = os.getenv("ORBIT_BASE_DIR")
+_base_dir_env = os.getenv("CIPHER_BASE_DIR")
 if _base_dir_env:
     _base = Path(_base_dir_env).expanduser()
     BASE_DIR = _base if _base.is_absolute() else (PROJECT_ROOT / _base).resolve()
 else:
-    BASE_DIR = PROJECT_ROOT / "orbit_data"
+    BASE_DIR = PROJECT_ROOT / "cipher_station_data"
 
 KEYS_DIR = BASE_DIR / "keys"
-DB_PATH = BASE_DIR / "orbit.db"
+DB_PATH = BASE_DIR / "cipherstation.db"
 PUBLIC_JSON_PATH = BASE_DIR / "public.json"
 MANIFEST_DIR = BASE_DIR / "manifests"
 
 # ---------------------------------------------------------------------------
 # Identity
 # ---------------------------------------------------------------------------
-ORBIT_PASSWORD = os.getenv("ORBIT_PASSWORD", "")
+CIPHER_PASSWORD = os.getenv("CIPHER_PASSWORD", "")
 
 # ---------------------------------------------------------------------------
 # IPFS
@@ -45,8 +45,8 @@ IPFS_MAX_RETRIES = int(os.getenv("IPFS_MAX_RETRIES", "3"))
 # ---------------------------------------------------------------------------
 # Server
 # ---------------------------------------------------------------------------
-ORBIT_PORT = int(os.getenv("ORBIT_PORT", "8443"))
-ORBIT_HOST = os.getenv("ORBIT_HOST", "0.0.0.0")
+CIPHER_PORT = int(os.getenv("CIPHER_PORT", "8443"))
+CIPHER_HOST = os.getenv("CIPHER_HOST", "0.0.0.0")
 SSL_CERTFILE = os.getenv("SSL_CERTFILE", str(BASE_DIR / "ssl" / "cert.pem"))
 SSL_KEYFILE = os.getenv("SSL_KEYFILE", str(BASE_DIR / "ssl" / "key.pem"))
 

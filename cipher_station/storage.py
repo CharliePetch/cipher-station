@@ -1,10 +1,11 @@
-# orbit_node/storage.py
+# cipher_station/storage.py
 
 import json
 import logging
+import os
 from pathlib import Path
 
-from orbit_node.config import BASE_DIR, KEYS_DIR, PUBLIC_JSON_PATH
+from cipher_station.config import BASE_DIR, KEYS_DIR, PUBLIC_JSON_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +33,14 @@ def read_file(path: Path) -> bytes:
 
 
 def write_json(path: Path, obj: dict):
+    """Write JSON atomically (temp file + os.replace) so a crash mid-write can't
+    truncate the destination."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w") as f:
             json.dump(obj, f, indent=4)
+        os.replace(tmp, path)
     except (OSError, TypeError) as exc:
         logger.error("Failed to write JSON %s: %s", path, exc)
         raise

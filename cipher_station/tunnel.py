@@ -1,4 +1,4 @@
-# orbit_node/tunnel.py
+# cipher_station/tunnel.py
 #
 # Cloudflare Quick Tunnel detection + IPNS endpoint publishing.
 #
@@ -15,7 +15,7 @@ import time
 
 import requests
 
-from orbit_node.config import (
+from cipher_station.config import (
     CLOUDFLARE_TUNNEL_ENABLED,
     CLOUDFLARE_METRICS_PORT,
     PUBLIC_JSON_PATH,
@@ -80,7 +80,7 @@ def _update_endpoint(endpoint_url: str) -> None:
     logger.info("Tunnel endpoint updated in public.json: %s", endpoint_url)
 
     # --- Publish to IPFS + IPNS ---
-    from orbit_node.ipfs_client import publish_public_json_to_ipns
+    from cipher_station.ipfs_client import publish_public_json_to_ipns
     publish_public_json_to_ipns()
 
 

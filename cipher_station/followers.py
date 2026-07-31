@@ -1,7 +1,7 @@
-# orbit_node/followers.py
+# cipher_station/followers.py
 
 from typing import List, Dict
-from orbit_node.database import get_db
+from cipher_station.database import get_db
 
 
 # ---------------------------------------------------------

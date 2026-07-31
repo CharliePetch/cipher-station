@@ -1,38 +1,36 @@
 # tests/test_crypto.py
 
+import os
 import pytest
-from nacl.public import PrivateKey, SealedBox
 from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
-from nacl.encoding import HexEncoder
 
-from orbit_node.crypto import (
-    generate_identity_keypair,
-    encrypt_private_keys,
-    decrypt_private_keys,
-    envelope_for_recipient,
-    open_envelope,
-)
+from cipher_station.crypto import encrypt_private_keys, decrypt_private_keys
+from cipher_station import pqcrypto
 
 
-class TestKeypairGeneration:
-    def test_generates_distinct_keys(self):
-        sk1, pk1 = generate_identity_keypair()
-        sk2, pk2 = generate_identity_keypair()
-        assert pk1.encode() != pk2.encode()
-        assert sk1.encode() != sk2.encode()
+class TestPQCKeygen:
+    def test_mlkem_sizes(self):
+        pub, sec = pqcrypto.generate_mlkem_keypair()
+        assert len(pub) == pqcrypto.MLKEM_PUBLIC_BYTES
+        assert len(sec) == pqcrypto.MLKEM_SECRET_BYTES
 
-    def test_key_sizes(self):
-        sk, pk = generate_identity_keypair()
-        assert len(sk.encode()) == 32
-        assert len(pk.encode()) == 32
+    def test_mldsa_sizes(self):
+        pub, sec = pqcrypto.generate_mldsa_keypair()
+        assert len(pub) == pqcrypto.MLDSA_PUBLIC_BYTES
+        assert len(sec) == pqcrypto.MLDSA_SECRET_BYTES
+
+    def test_distinct_keys(self):
+        p1, _ = pqcrypto.generate_mlkem_keypair()
+        p2, _ = pqcrypto.generate_mlkem_keypair()
+        assert p1 != p2
 
 
 class TestSecretBox:
     def test_round_trip(self):
         key = nacl_random(SecretBox.KEY_SIZE)
         box = SecretBox(key)
-        plaintext = b"hello orbit"
+        plaintext = b"hello cipher station"
         ct = box.encrypt(plaintext)
         assert box.decrypt(ct) == plaintext
 
@@ -51,40 +49,27 @@ class TestSecretBox:
         assert ct1 != ct2  # nonce makes them different
 
 
-class TestSealedBox:
-    def test_round_trip(self, test_keypair):
-        sk, pk_hex = test_keypair
-        plaintext = b"sealed secret"
-        encrypted = envelope_for_recipient(plaintext, pk_hex)
-        decrypted = open_envelope(encrypted, sk)
-        assert decrypted == plaintext
-
-    def test_wrong_key_fails(self, test_keypair, second_keypair):
-        _, pk_hex = test_keypair
-        wrong_sk, _ = second_keypair
-        encrypted = envelope_for_recipient(b"secret", pk_hex)
-        with pytest.raises(Exception):
-            open_envelope(encrypted, wrong_sk)
-
-
 class TestArgon2iKeyEncryption:
     def test_round_trip(self):
-        sk, _ = generate_identity_keypair()
-        raw = sk.encode()
+        raw = os.urandom(32)
         password = "test-password-123"
         bundle = encrypt_private_keys(raw, password)
         decrypted = decrypt_private_keys(bundle, password)
         assert decrypted == raw
 
+    def test_large_bundle_round_trip(self):
+        # ML-DSA secret keys are ~4 KB; ensure the at-rest wrapper handles them.
+        raw = os.urandom(pqcrypto.MLDSA_SECRET_BYTES)
+        bundle = encrypt_private_keys(raw, "pw")
+        assert decrypt_private_keys(bundle, "pw") == raw
+
     def test_wrong_password_fails(self):
-        sk, _ = generate_identity_keypair()
-        raw = sk.encode()
+        raw = os.urandom(32)
         bundle = encrypt_private_keys(raw, "correct")
         with pytest.raises(Exception):
             decrypt_private_keys(bundle, "wrong")
 
     def test_bundle_format(self):
-        sk, _ = generate_identity_keypair()
-        bundle = encrypt_private_keys(sk.encode(), "pw")
+        bundle = encrypt_private_keys(os.urandom(32), "pw")
         # salt (16) + nonce (24) + encrypted (32) + mac (16) = 88
         assert len(bundle) == 16 + 24 + 32 + 16
