@@ -1,0 +1,15 @@
+<!--
+  Horizontal lockup: mark + wordmark, for contexts an <svg> is the only option
+  (email signatures, social profile headers, print). On the web, render the
+  real thing instead — <CipherMark /> + text set in Geist Sans (see
+  components/Logo.tsx) — this file substitutes system-ui because SVG can't
+  depend on next/font.
+-->
+<svg viewBox="0 0 220 32" xmlns="http://www.w3.org/2000/svg">
+  <g stroke="#0f766e" stroke-width="2" stroke-linecap="round" fill="none">
+    <circle cx="16" cy="16" r="4.2" />
+    <ellipse cx="16" cy="16" rx="13" ry="6" transform="rotate(-30 16 16)" />
+  </g>
+  <text x="40" y="21" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+    font-size="17" font-weight="700" letter-spacing="-0.3" fill="#1a1a1a">Cipher Station</text>
+</svg>
