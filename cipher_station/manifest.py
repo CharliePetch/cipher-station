@@ -341,6 +341,82 @@ def set_client_profile(fields: dict, *, client: Optional[str] = None) -> dict:
     return profile
 
 
+# -----------------------------
+# Ownership: which CIDs did THIS station publish?
+# -----------------------------
+
+# Artifact pointers the station writes into public.json. Everything else it
+# publishes is referenced from the manifest.
+PUBLIC_JSON_CID_FIELDS = (
+    "manifest_pointer",
+    "following_cid",
+    "followers_cid",
+    "follow_decoder_envelopes_cid",
+)
+
+
+def station_content_cids() -> set[str]:
+    """
+    Every CID this station published and still references.
+
+    Sources — the complete set of places the station records something it added
+    to IPFS:
+      * manifest: clients.<client>.posts[].post_cid / .envelopes_cid
+      * manifest: clients.<client>.profile.avatar_cid
+      * public.json: manifest_pointer, following_cid, followers_cid,
+        follow_decoder_envelopes_cid
+
+    Deliberately NOT a "did IPFS pin this" check: pinned-ness would also cover
+    content the node happens to have cached or that a previous owner pinned.
+    Referenced-by-our-own-state is the narrower, cheaper answer.
+    """
+    cids: set[str] = set()
+
+    manifest = load_manifest()
+    for bucket in (manifest.get("clients") or {}).values():
+        if not isinstance(bucket, dict):
+            continue
+        for post in bucket.get("posts") or []:
+            if not isinstance(post, dict):
+                continue
+            for key in ("post_cid", "envelopes_cid"):
+                value = post.get(key)
+                if isinstance(value, str) and value:
+                    cids.add(value)
+        profile = bucket.get("profile")
+        if isinstance(profile, dict):
+            avatar = profile.get("avatar_cid")
+            if isinstance(avatar, str) and avatar:
+                cids.add(avatar)
+
+    try:
+        public_obj = json.loads(PUBLIC_JSON_PATH.read_text()) if PUBLIC_JSON_PATH.exists() else {}
+    except Exception as exc:
+        logger.warning("station_content_cids: could not read public.json: %s", exc)
+        public_obj = {}
+
+    if isinstance(public_obj, dict):
+        for key in PUBLIC_JSON_CID_FIELDS:
+            value = public_obj.get(key)
+            if isinstance(value, str) and value:
+                cids.add(value)
+
+    return cids
+
+
+def station_owns_cid(cid: str) -> bool:
+    """
+    Whether `cid` is one this station published (exact string match against
+    ``station_content_cids()``).
+
+    Recomputed per call — both inputs are small local JSON files, and a cache
+    would go stale the moment a post is created or deleted.
+    """
+    if not isinstance(cid, str) or not cid:
+        return False
+    return cid in station_content_cids()
+
+
 def remove_post_from_manifest(
     post_cid: str,
     *,

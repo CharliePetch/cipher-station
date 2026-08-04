@@ -42,6 +42,13 @@ IPFS_API = os.getenv("IPFS_API_URL", "http://127.0.0.1:5001")
 IPFS_TIMEOUT = int(os.getenv("IPFS_TIMEOUT", "30"))
 IPFS_MAX_RETRIES = int(os.getenv("IPFS_MAX_RETRIES", "3"))
 
+# The node's own HTTP gateway. Both installers bind it to 127.0.0.1:8080 (never
+# publicly exposed). GET /content/{cid} streams already-pinned bytes from here
+# rather than from the API, because the gateway supplies Content-Length, honours
+# HTTP Range, and implements `Cache-Control: only-if-cached` — which makes a
+# local-only read enforceable (412 instead of a network fetch).
+IPFS_GATEWAY = os.getenv("IPFS_GATEWAY_URL", "http://127.0.0.1:8080").rstrip("/")
+
 # ---------------------------------------------------------------------------
 # Server
 # ---------------------------------------------------------------------------

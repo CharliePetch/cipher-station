@@ -1208,6 +1208,48 @@ Re-wrap an existing post for a new audience (re-issue envelopes without re-uploa
 
 `audience_mode` accepts `self`, `specific`, or `all` — **not** `public` (resharing to/from `public` is unsupported; create a new public post instead). Returns 400 on an invalid audience and 404 if the post is not found.
 
+#### `GET /content/{cid}`
+
+Stream the raw bytes of a CID **this station published**, from the station's own IPFS node.
+
+**Authentication:** owner-only. The Section 12.5 signature headers, signed by a paired delegate device whose authenticated `uid` equals the station's own `uid`. A follower's device authenticates against the station but is **not** served content here (403) — followers read the same CIDs from IPFS/public gateways as before.
+
+**Why it exists:** a public gateway holds none of this content, so it must cold-fetch every block from the origin node over bitswap before it can answer. On a thinly-peered station that is slow and, for large objects, routinely closes the connection mid-body after `Content-Length` promised more — which surfaces on iOS as `NSURLErrorNetworkConnectionLost`. The station already has the content pinned: this route is one hop, with no DHT and no bitswap.
+
+**Request headers:**
+
+| Header | Description |
+|--------|-------------|
+| `Range` | MAY. `bytes=<start>-<end>`, either bound optional. A malformed value is ignored (full body returned). **Single range only** — a comma-separated multi-range is syntactically accepted but kubo serves only the FIRST range, returning `206` with a `Content-Range` covering just that one. Do not send multi-range expecting all of it back. |
+
+**Responses:**
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Full body. `Content-Type: application/octet-stream`, `Content-Length` set, `Accept-Ranges: bytes`, `ETag` forwarded from the node. |
+| `206` | Partial body for a `Range` request, with `Content-Range`. |
+| `404` | The station did not publish this CID, the CID is malformed, or the bytes are not in its local blockstore. The three cases are deliberately indistinguishable. |
+| `416` | The requested range is not satisfiable. |
+| `503` | The station's own IPFS node is unreachable. |
+
+The body is **streamed**: the station never buffers the whole object in memory, so a 19 MB post starts arriving immediately.
+
+**Which CIDs are servable.** Only those referenced by this station's own published state:
+
+* `clients.<client>.posts[].post_cid` and `.envelopes_cid` (Section 8.1)
+* `clients.<client>.profile.avatar_cid`
+* the artifact pointers in `public.json` — `manifest_pointer`, `following_cid`, `followers_cid`, `follow_decoder_envelopes_cid` (Section 5.3)
+
+Everything else is `404`. Without that restriction an authenticated route would be a general-purpose IPFS proxy for whoever is paired to the station, and a way to make the station pull arbitrary content off the network on request. Membership is an exact string match, so a CID MUST be requested in the same form the manifest records it (clients read CIDs from the manifest, so this is automatic). Deleting a post removes its CIDs from the manifest and therefore from this route.
+
+**Local-only read.** The station reads from its own IPFS HTTP gateway (bound to `127.0.0.1:8080` by both installers, never publicly exposed) with `Cache-Control: only-if-cached`. A CID whose **root block** the node does not already hold answers `404` in milliseconds instead of triggering a network fetch.
+
+Be precise about how far that header goes: kubo evaluates `only-if-cached` at the **resolved root only**. Once the root is cached it will fetch missing child blocks from the network normally — measured at ~20 MB pulled over bitswap inside a request that carried the header. So the real guarantee is not "the header makes a network fetch impossible", it is **"the station added and recursively pinned everything `station_owns_cid` admits, so it holds the whole DAG"**. The header is a fast, cheap second line, not the load-bearing one.
+
+That distinction matters if the servable set is ever widened. A CID admitted to the set whose DAG the station does *not* fully hold would stream partially and then stall on a network fetch — and because `Content-Length` is already on the wire by then, a per-read timeout would deliver a **truncated body**, which is the exact failure this route exists to eliminate.
+
+> **Client guidance:** try your own station first, and fall back to a public gateway on any failure. The gateway path remains the only route for content on stations the user merely *follows*, and for when the user's own station is unreachable.
+
 ### 14.4 Pairing Endpoints
 
 #### `POST /delegate/start`
@@ -1280,11 +1322,19 @@ Delegate                    Station                     IPFS
   |                           |                           |
   |  7. Decrypt envelope      |                           |
   |     -> sym_key            |                           |
-  |  8. Fetch post blob --------------------------------->|
+  |  8. GET /content/{cid} -->|  local read of pinned     |
+  |     (authenticated)       |  bytes — no DHT, no       |
+  |  <-- encrypted blob ------|  bitswap, streamed        |
+  |                           |                           |
+  |  8b. on failure only: fetch the blob from a public    |
+  |      gateway ---------------------------------------->|
   |  <-- encrypted blob ----------------------------------|
+  |                           |                           |
   |  9. Decrypt with sym_key  |                           |
   |     -> plaintext          |                           |
 ```
+
+Step 8 is the fast path for the user's **own** content: the station has it pinned, so the read is one hop. Step 8b (a public gateway, Section 14.3) is the fallback, and the only path for content on stations the user merely follows — a gateway has to pull every block from the origin node before it can answer, which is what makes it slow and unreliable for large, cold objects.
 
 ### 15.3 Follower Enrollment
 

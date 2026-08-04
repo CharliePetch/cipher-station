@@ -1,17 +1,34 @@
 # cipher_station/ipfs_client.py
 
 import logging
+import re
 import time
+from urllib.parse import quote
 
 import requests
 
-from cipher_station.config import IPFS_API, IPFS_TIMEOUT, IPFS_MAX_RETRIES
+from cipher_station.config import (
+    IPFS_API,
+    IPFS_GATEWAY,
+    IPFS_TIMEOUT,
+    IPFS_MAX_RETRIES,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class IPFSError(Exception):
     """Raised when an IPFS operation fails after all retries."""
+    pass
+
+
+class IPFSNotLocal(IPFSError):
+    """
+    The requested CID is not in this node's local blockstore.
+
+    Raised instead of going out to the network for it — see
+    ``ipfs_open_local_stream``.
+    """
     pass
 
 
@@ -62,6 +79,11 @@ def ipfs_add_bytes(data: bytes) -> str:
 def ipfs_add_file(path: str) -> str:
     """
     Upload a local disk file to IPFS and return the CID.
+
+    Currently has no callers. If you add one, record the resulting CID somewhere
+    ``manifest.station_content_cids()`` looks — otherwise the content exists and
+    is pinned but ``GET /content/{cid}`` will 404 it, because that route serves
+    only CIDs this station's own state references.
     """
     with open(path, "rb") as f:
         return ipfs_add_bytes(f.read())
@@ -153,6 +175,10 @@ def ipfs_object_stat(cid: str) -> dict:
 def ipfs_get_bytes(cid: str) -> bytes:
     """
     Fetch raw binary data from IPFS.
+
+    Buffers the whole object in memory and MAY fetch from the network. Fine for
+    the small JSON documents the station reads (envelopes, graphs); use
+    ``ipfs_open_local_stream`` for serving post blobs.
     """
     def _post():
         r = requests.post(
@@ -165,6 +191,107 @@ def ipfs_get_bytes(cid: str) -> bytes:
         return r.content
 
     return _with_retry(_post)
+
+
+# ---------------------------------------------------------------------------
+# Local-only streaming read (backs GET /content/{cid})
+# ---------------------------------------------------------------------------
+
+# Both CIDv0 (base58btc, "Qm…", 46 chars) and CIDv1 (base32, "bafy…", 59+) are
+# alphanumeric. Anything else cannot be a CID, and — since the value is
+# interpolated into a gateway URL path — must never reach the request.
+_CID_RE = re.compile(r"^[A-Za-z0-9]{46,128}$")
+
+# `bytes=<a>-<b>` with either bound optional, optionally a comma-separated list.
+_RANGE_RE = re.compile(r"^bytes=\d*-\d*(?:\s*,\s*\d*-\d*)*$")
+
+CONTENT_CHUNK_SIZE = 64 * 1024
+
+
+def is_plausible_cid(cid: str) -> bool:
+    """Cheap syntactic check: could this string be a CID? (Not a decode.)"""
+    return isinstance(cid, str) and bool(_CID_RE.match(cid))
+
+
+def is_valid_range_header(value: str) -> bool:
+    """Whether a client-supplied Range header is safe to pass to the gateway."""
+    return isinstance(value, str) and len(value) <= 128 and bool(_RANGE_RE.match(value))
+
+
+def ipfs_open_local_stream(cid: str, *, range_header: str | None = None):
+    """
+    Open a STREAMING read of `cid` from this node's own HTTP gateway, without
+    going to the network for content the node does not already have.
+
+    How far ``only-if-cached`` actually goes, because it is easy to over-trust:
+    kubo evaluates it at the RESOLVED ROOT. A root the node lacks answers 412 in
+    milliseconds and never touches the network — but once the root is cached,
+    missing CHILD blocks are fetched over bitswap as normal (measured: ~20 MB
+    pulled inside a request carrying the header). The guarantee that callers
+    actually rely on is upstream of this function: the station added and
+    recursively pinned everything ``station_owns_cid`` will admit, so it holds
+    the whole DAG. Widen that set to content the station did not itself pin and
+    this stops being a local read.
+
+    Why the gateway and not ``/api/v0/cat``:
+      * it sets Content-Length and honours HTTP Range (206 + Content-Range),
+        so a resumable download needs no size bookkeeping here;
+      * it implements ``Cache-Control: only-if-cached``, answering 412 in
+        milliseconds when the blocks are not already local. ``/api/v0/cat`` can
+        do local-only too (``offline=true``), but gives neither length nor Range.
+    Both installers bind the gateway to 127.0.0.1:8080; it is not publicly
+    exposed. Override with IPFS_GATEWAY_URL.
+
+    Returns the open ``requests.Response`` — 200, 206 for a satisfied Range, or
+    416 for an unsatisfiable one. THE CALLER OWNS IT and MUST call ``.close()``
+    — iterate ``.iter_content()`` inside a try/finally.
+
+    Raises:
+        ValueError    — `cid` is not syntactically a CID (never sent anywhere).
+        IPFSNotLocal  — the gateway has no local copy (412), or the CID is
+                        unroutable/invalid (400/404/410/451). No network fetch
+                        was attempted.
+        IPFSError     — the gateway is unreachable or answered unexpectedly.
+    """
+    if not is_plausible_cid(cid):
+        raise ValueError(f"not a CID: {cid!r}")
+
+    headers = {
+        # Never fetch from the network: 412 if it is not already in the
+        # blockstore. This is what keeps an authenticated route from doubling
+        # as "make the station go get arbitrary content off IPFS".
+        "Cache-Control": "only-if-cached",
+        # Keep Content-Length meaningful: no transport compression.
+        "Accept-Encoding": "identity",
+    }
+    if range_header and is_valid_range_header(range_header):
+        headers["Range"] = range_header
+
+    url = f"{IPFS_GATEWAY}/ipfs/{quote(cid, safe='')}"
+
+    try:
+        resp = requests.get(
+            url,
+            headers=headers,
+            stream=True,
+            timeout=IPFS_TIMEOUT,
+            allow_redirects=False,
+        )
+    except requests.exceptions.RequestException as exc:
+        raise IPFSError(f"local IPFS gateway unreachable: {exc}") from exc
+
+    if resp.status_code in (200, 206, 416):
+        return resp
+
+    status = resp.status_code
+    resp.close()
+
+    if status in (400, 404, 410, 412, 451):
+        # 412 == only-if-cached miss (not held locally); the rest mean the
+        # gateway will not serve this path at all.
+        raise IPFSNotLocal(f"CID not available locally: {cid} (gateway {status})")
+
+    raise IPFSError(f"local IPFS gateway returned {status} for {cid}")
 
 
 # ---------------------------------------------------------------------------

@@ -271,6 +271,77 @@ def storage_info():
 
 
 # ---------------------------------------------------------
+# CONTENT
+#
+# Serves already-pinned bytes straight off this station, so a delegate never
+# has to ask a public gateway to go find content the station is already
+# holding. (Public gateways must cold-fetch the blocks over bitswap from this
+# node; on a thinly-peered box that is slow and, for large objects, routinely
+# truncates mid-body — which surfaces on iOS as "network connection lost".)
+#
+# Two things keep this from being an open IPFS proxy:
+#   1. require_owner — only the station owner's own paired delegate devices.
+#   2. station_owns_cid — only CIDs this station published (see manifest.py).
+# The read is local in the way that matters, but not by fiat: only-if-cached is
+# evaluated at the ROOT, so a root we lack is a fast 404 and never a pull, while
+# a cached root with absent children would still fetch them over bitswap. What
+# makes that unreachable is the set above — the station added and recursively
+# pinned everything station_owns_cid admits, so it holds the whole DAG. Widen
+# that set to content the station did not pin and this stops being true.
+# ---------------------------------------------------------
+@app.get("/content/{cid}")
+def get_content(cid: str, request: Request, delegate=Depends(require_owner)):
+    from cipher_station.ipfs_client import (
+        CONTENT_CHUNK_SIZE,
+        IPFSNotLocal,
+        ipfs_open_local_stream,
+        is_plausible_cid,
+    )
+    from cipher_station.manifest import station_owns_cid
+    from starlette.responses import StreamingResponse
+
+    # Malformed, unknown, and not-held-locally all answer the same 404: the
+    # station will not confirm which of the three it was.
+    if not is_plausible_cid(cid) or not station_owns_cid(cid):
+        logger.info("GET /content/%s rejected: not published by this station", cid)
+        raise HTTPException(status_code=404, detail="content not found")
+
+    try:
+        upstream = ipfs_open_local_stream(cid, range_header=request.headers.get("range"))
+    except IPFSNotLocal:
+        logger.warning("GET /content/%s: referenced by our state but not in the local blockstore", cid)
+        raise HTTPException(status_code=404, detail="content not found")
+    except Exception as exc:
+        logger.error("GET /content/%s: local gateway read failed: %s", cid, exc)
+        raise HTTPException(status_code=503, detail="content store unavailable")
+
+    if upstream.status_code == 416:
+        upstream.close()
+        raise HTTPException(status_code=416, detail="requested range not satisfiable")
+
+    headers = {"Accept-Ranges": "bytes"}
+    for header in ("Content-Length", "Content-Range", "ETag"):
+        value = upstream.headers.get(header)
+        if value:
+            headers[header] = value
+
+    def stream():
+        try:
+            for chunk in upstream.iter_content(chunk_size=CONTENT_CHUNK_SIZE):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()
+
+    return StreamingResponse(
+        stream(),
+        status_code=upstream.status_code,   # 200, or 206 for a Range request
+        headers=headers,
+        media_type="application/octet-stream",
+    )
+
+
+# ---------------------------------------------------------
 # INBOX
 # ---------------------------------------------------------
 @app.post("/inbox")
