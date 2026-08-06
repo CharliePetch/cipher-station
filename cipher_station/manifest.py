@@ -9,9 +9,10 @@ from cipher_station.config import MANIFEST_DIR, PUBLIC_JSON_PATH
 
 logger = logging.getLogger(__name__)
 from cipher_station import pqcrypto
-from cipher_station.storage import write_json
+from cipher_station.storage import write_json, STATE_LOCK
 from cipher_station.envelopes import encrypt_key_for_follower
-from cipher_station.ipfs_client import ipfs_add_bytes, ipfs_unpin, ipfs_repo_gc, publish_public_json_to_ipns
+from cipher_station.ipfs_client import ipfs_add_bytes, ipfs_unpin, ipfs_repo_gc
+from cipher_station.ipns_publisher import request_publish
 
 MANIFEST_PATH = MANIFEST_DIR / "manifest.json"
 
@@ -98,17 +99,28 @@ def _publish_manifest_to_ipfs(manifest: dict) -> str:
 
 
 def _update_public_json_manifest_pointer(manifest_cid: str) -> dict:
-    try:
-        public_obj = json.loads(PUBLIC_JSON_PATH.read_text()) if PUBLIC_JSON_PATH.exists() else {}
-    except Exception as e:
-        logger.error(f"Failed to load public.json (will recreate): {e}")
-        public_obj = {}
+    with STATE_LOCK:
+        # Never fall back to an empty object here: public.json carries the
+        # station's identity (uid, ML-KEM/ML-DSA public keys, endpoint), and
+        # recreating it as {"manifest_pointer": ...} would destroy that identity
+        # and prevent the station from starting again. If the file is missing or
+        # unreadable, skip the pointer update and keep the old state.
+        try:
+            if not PUBLIC_JSON_PATH.exists():
+                logger.warning("public.json missing — skipping manifest pointer update")
+                return {}
+            public_obj = json.loads(PUBLIC_JSON_PATH.read_text())
+        except Exception as e:
+            logger.error(f"Failed to load public.json — NOT overwriting it: {e}")
+            return {}
 
-    public_obj["manifest_pointer"] = manifest_cid
-    write_json(PUBLIC_JSON_PATH, public_obj)
+        public_obj["manifest_pointer"] = manifest_cid
+        write_json(PUBLIC_JSON_PATH, public_obj)
 
-    # Republish to IPFS + IPNS so the decentralized pointer stays current
-    publish_public_json_to_ipns()
+    # Republish to IPFS + IPNS so the decentralized pointer stays current.
+    # Queued to a background worker: an IPNS DHT publish can take minutes and
+    # must never hold a request thread (see ipns_publisher.py).
+    request_publish()
 
     return public_obj
 
@@ -268,22 +280,26 @@ def _append_entry_and_publish(entry: dict, client_key: str) -> dict:
     # encrypted and public paths; preserved if a caller already set one).
     entry.setdefault("created_at", int(time.time()))
 
-    manifest = load_manifest(client=client_key)
-    manifest = _normalize_manifest_shape(manifest, default_client=client_key)
+    # The whole load → append → save → pointer-update cycle runs under the
+    # state lock: concurrent /post threads would otherwise each load the same
+    # manifest and the last save would silently drop the other's entry.
+    with STATE_LOCK:
+        manifest = load_manifest(client=client_key)
+        manifest = _normalize_manifest_shape(manifest, default_client=client_key)
 
-    manifest["clients"].setdefault(client_key, {"posts": []})
-    if not isinstance(manifest["clients"][client_key], dict):
-        manifest["clients"][client_key] = {"posts": []}
+        manifest["clients"].setdefault(client_key, {"posts": []})
+        if not isinstance(manifest["clients"][client_key], dict):
+            manifest["clients"][client_key] = {"posts": []}
 
-    manifest["clients"][client_key].setdefault("posts", [])
-    if not isinstance(manifest["clients"][client_key]["posts"], list):
-        manifest["clients"][client_key]["posts"] = []
+        manifest["clients"][client_key].setdefault("posts", [])
+        if not isinstance(manifest["clients"][client_key]["posts"], list):
+            manifest["clients"][client_key]["posts"] = []
 
-    manifest["clients"][client_key]["posts"].append(entry)
-    save_manifest(manifest, client=client_key)
+        manifest["clients"][client_key]["posts"].append(entry)
+        save_manifest(manifest, client=client_key)
 
-    manifest_cid = _publish_manifest_to_ipfs(manifest)
-    _update_public_json_manifest_pointer(manifest_cid)
+        manifest_cid = _publish_manifest_to_ipfs(manifest)
+        _update_public_json_manifest_pointer(manifest_cid)
 
     return manifest
 
@@ -318,25 +334,26 @@ def set_client_profile(fields: dict, *, client: Optional[str] = None) -> dict:
     """
     client_key = (client or "default").strip() or "default"
 
-    manifest = load_manifest(client=client_key)
-    manifest = _normalize_manifest_shape(manifest, default_client=client_key)
+    with STATE_LOCK:
+        manifest = load_manifest(client=client_key)
+        manifest = _normalize_manifest_shape(manifest, default_client=client_key)
 
-    bucket = manifest["clients"].setdefault(client_key, {"posts": []})
-    if not isinstance(bucket, dict):
-        bucket = {"posts": []}
-        manifest["clients"][client_key] = bucket
-    bucket.setdefault("posts", [])
+        bucket = manifest["clients"].setdefault(client_key, {"posts": []})
+        if not isinstance(bucket, dict):
+            bucket = {"posts": []}
+            manifest["clients"][client_key] = bucket
+        bucket.setdefault("posts", [])
 
-    profile = bucket.get("profile")
-    if not isinstance(profile, dict):
-        profile = {}
-    profile.update(fields)
-    profile["updated_at"] = int(time.time())
-    bucket["profile"] = profile
+        profile = bucket.get("profile")
+        if not isinstance(profile, dict):
+            profile = {}
+        profile.update(fields)
+        profile["updated_at"] = int(time.time())
+        bucket["profile"] = profile
 
-    save_manifest(manifest, client=client_key)
-    manifest_cid = _publish_manifest_to_ipfs(manifest)
-    _update_public_json_manifest_pointer(manifest_cid)
+        save_manifest(manifest, client=client_key)
+        manifest_cid = _publish_manifest_to_ipfs(manifest)
+        _update_public_json_manifest_pointer(manifest_cid)
 
     return profile
 
@@ -431,29 +448,19 @@ def remove_post_from_manifest(
 
     Returns dict with status info.
     """
-    manifest = load_manifest(client=client)
+    # Locked through the pointer update (same reasoning as
+    # _append_entry_and_publish); the slow unpin + GC below runs outside the
+    # lock so it can't stall concurrent uploads.
+    with STATE_LOCK:
+        manifest = load_manifest(client=client)
 
-    found = False
-    searched_client = None
-    removed_entry = None
+        found = False
+        searched_client = None
+        removed_entry = None
 
-    if client:
-        client_key = client.strip() or "default"
-        bucket = manifest.get("clients", {}).get(client_key, {})
-        posts = bucket.get("posts", [])
-        kept = []
-        for p in posts:
-            if p.get("post_cid") == post_cid and removed_entry is None:
-                removed_entry = p
-            else:
-                kept.append(p)
-        if removed_entry is not None:
-            bucket["posts"] = kept
-            found = True
-            searched_client = client_key
-    else:
-        # Search all client buckets
-        for ck, bucket in manifest.get("clients", {}).items():
+        if client:
+            client_key = client.strip() or "default"
+            bucket = manifest.get("clients", {}).get(client_key, {})
             posts = bucket.get("posts", [])
             kept = []
             for p in posts:
@@ -464,16 +471,30 @@ def remove_post_from_manifest(
             if removed_entry is not None:
                 bucket["posts"] = kept
                 found = True
-                searched_client = ck
-                break
+                searched_client = client_key
+        else:
+            # Search all client buckets
+            for ck, bucket in manifest.get("clients", {}).items():
+                posts = bucket.get("posts", [])
+                kept = []
+                for p in posts:
+                    if p.get("post_cid") == post_cid and removed_entry is None:
+                        removed_entry = p
+                    else:
+                        kept.append(p)
+                if removed_entry is not None:
+                    bucket["posts"] = kept
+                    found = True
+                    searched_client = ck
+                    break
 
-    if not found:
-        return {"status": "not_found", "post_cid": post_cid}
+        if not found:
+            return {"status": "not_found", "post_cid": post_cid}
 
-    save_manifest(manifest, client=searched_client)
+        save_manifest(manifest, client=searched_client)
 
-    manifest_cid = _publish_manifest_to_ipfs(manifest)
-    _update_public_json_manifest_pointer(manifest_cid)
+        manifest_cid = _publish_manifest_to_ipfs(manifest)
+        _update_public_json_manifest_pointer(manifest_cid)
 
     # Unpin the deleted post's content and envelopes from IPFS
     unpinned_cids = []

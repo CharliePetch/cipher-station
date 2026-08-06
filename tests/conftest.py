@@ -70,6 +70,18 @@ def temp_cipher_station_dir(tmp_path, monkeypatch):
     # Patch DB_PATH on the database module too (it binds at import time)
     monkeypatch.setattr(db_mod, "DB_PATH", tmp_path / "cipher_station_data" / "cipherstation.db")
 
+    # CRITICAL: neutralize the background IPNS publisher. Its worker debounces
+    # for 2s, so a publish queued by a test could fire AFTER this fixture's
+    # monkeypatches revert — at which point publish_public_json_to_ipns would
+    # resolve the REAL config paths and could rewrite the live station's
+    # public.json. Stub the queueing entry point everywhere it was imported.
+    import cipher_station.ipns_publisher as ipns_pub_mod
+    monkeypatch.setattr(ipns_pub_mod, "request_publish", lambda: None)
+    import cipher_station.manifest as _mf_mod
+    monkeypatch.setattr(_mf_mod, "request_publish", lambda: None, raising=False)
+    import cipher_station.graph as _graph_mod
+    monkeypatch.setattr(_graph_mod, "request_publish", lambda: None, raising=False)
+
     yield tmp_path
 
 

@@ -86,10 +86,11 @@ def _read_key_bundle(path: Path, expected_len: int, pub_len: int,
 # -----------------------------------------------------------
 
 def _write_public_json(obj: dict, mlkem_pub_hex: str, mldsa_pub_hex: str) -> dict:
+    from cipher_station.storage import write_json
     obj["mlkem_public_key"] = mlkem_pub_hex
     obj["mldsa_public_key"] = mldsa_pub_hex
     obj.pop("public_key", None)  # remove legacy X25519 field if present
-    PUBLIC_JSON_PATH.write_text(json.dumps(obj, indent=2))
+    write_json(PUBLIC_JSON_PATH, obj)
     return obj
 
 
@@ -183,7 +184,8 @@ def bootstrap_identity(password: str | None = None) -> Identity:
         "following_cid": None,
         "follow_decoder_envelopes_cid": None,
     }
-    PUBLIC_JSON_PATH.write_text(json.dumps(public_json, indent=2))
+    from cipher_station.storage import write_json
+    write_json(PUBLIC_JSON_PATH, public_json)
     logger.info(f"Identity bootstrapped (post-quantum): uid={uid}")
 
     return Identity(mlkem_sk, mldsa_sk, mlkem_pub.hex(), mldsa_pub.hex(), public_json)

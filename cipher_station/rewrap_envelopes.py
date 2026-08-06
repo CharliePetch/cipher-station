@@ -253,9 +253,11 @@ def rewrap_all_posts(mlkem_sk: bytes, debug: bool = False) -> dict:
         posts_list[idx] = entry
         updated_posts += 1
 
-    save_manifest(manifest)
-    manifest_cid = _publish_manifest_to_ipfs(manifest)
-    _update_public_json_manifest_pointer(manifest_cid)
+    from cipher_station.storage import STATE_LOCK
+    with STATE_LOCK:
+        save_manifest(manifest)
+        manifest_cid = _publish_manifest_to_ipfs(manifest)
+        _update_public_json_manifest_pointer(manifest_cid)
 
     out = {
         "status": "rewrap_manifest_ok",

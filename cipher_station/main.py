@@ -5,6 +5,7 @@ from pydantic import BaseModel
 import json
 import hashlib
 import logging
+import time
 
 from cipher_station.config import ensure_directories, MAX_UPLOAD_SIZE, CORS_ORIGINS
 from cipher_station.inbox import process_inbox_message
@@ -88,6 +89,12 @@ async def capture_raw_body_sha256(request: Request, call_next):
                 content={"error": f"Request too large (max {MAX_UPLOAD_SIZE} bytes)"}
             )
 
+        # Stamp receipt time BEFORE draining the body: the client signs its
+        # timestamp when it *starts* transmitting, so auth freshness must be
+        # judged against when the request began arriving, not when the last
+        # byte of a multi-minute upload landed (auth.py uses this).
+        request.state.auth_received_at = time.time()
+
         body = await request.body()
         request.state.raw_body_sha256 = hashlib.sha256(body).hexdigest()
 
@@ -162,8 +169,11 @@ def health_check():
         logger.error(f"Health check DB failed: {e}")
 
     try:
-        from cipher_station.ipfs_client import ipfs_add_bytes
-        ipfs_add_bytes(b"health")
+        # A read-only liveness probe: the old ipfs_add_bytes(b"health") did a
+        # real add+pin (a repo write) on every check, and the client polls
+        # /health while recovering an endpoint.
+        from cipher_station.ipfs_client import ipfs_id
+        ipfs_id()
         checks["ipfs"] = True
     except Exception as e:
         logger.error(f"Health check IPFS failed: {e}")

@@ -6,7 +6,9 @@ from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
 
 from cipher_station.config import PUBLIC_JSON_PATH, BASE_DIR
-from cipher_station.ipfs_client import ipfs_add_bytes, publish_public_json_to_ipns
+from cipher_station.ipfs_client import ipfs_add_bytes
+from cipher_station.ipns_publisher import request_publish
+from cipher_station.storage import write_json, STATE_LOCK
 from cipher_station.followers import list_followers
 from cipher_station.following import list_following
 from cipher_station.envelopes import encrypt_key_for_follower
@@ -113,16 +115,18 @@ def rebuild_graphs_and_envelopes():
     # ------------------------------------------------------
     # 5. Write all 3 CIDs to public.json
     # ------------------------------------------------------
-    public_json = json.loads(PUBLIC_JSON_PATH.read_text())
+    with STATE_LOCK:
+        public_json = json.loads(PUBLIC_JSON_PATH.read_text())
 
-    public_json["following_cid"] = following_cid
-    public_json["followers_cid"] = followers_cid
-    public_json["follow_decoder_envelopes_cid"] = follow_decoder_envelopes_cid
+        public_json["following_cid"] = following_cid
+        public_json["followers_cid"] = followers_cid
+        public_json["follow_decoder_envelopes_cid"] = follow_decoder_envelopes_cid
 
-    PUBLIC_JSON_PATH.write_text(json.dumps(public_json, indent=2))
+        write_json(PUBLIC_JSON_PATH, public_json)
 
     # Republish to IPFS + IPNS so the decentralized pointer stays current
-    publish_public_json_to_ipns()
+    # (queued to the background worker — never blocks the request thread)
+    request_publish()
 
     return {
         "following_cid": following_cid,

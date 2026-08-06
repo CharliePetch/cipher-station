@@ -59,29 +59,34 @@ def _update_endpoint(endpoint_url: str) -> None:
     Follows the same read-modify-write pattern as manifest.py and graph.py.
     Skips all writes if the endpoint hasn't changed.
     """
-    # --- Read current public.json ---
-    try:
-        if PUBLIC_JSON_PATH.exists():
-            obj = json.loads(PUBLIC_JSON_PATH.read_text())
-        else:
-            obj = {}
-    except Exception as exc:
-        logger.error("Failed to read public.json: %s", exc)
-        obj = {}
+    # --- Read-modify-write under the shared state lock (request threads read
+    # and rewrite this same file), atomically via write_json ---
+    from cipher_station.storage import write_json, STATE_LOCK
+    with STATE_LOCK:
+        try:
+            if PUBLIC_JSON_PATH.exists():
+                obj = json.loads(PUBLIC_JSON_PATH.read_text())
+            else:
+                obj = {}
+        except Exception as exc:
+            # Don't rebuild public.json from scratch on a read failure — that
+            # would wipe the station identity. Skip; the next cycle retries.
+            logger.error("Failed to read public.json — skipping endpoint update: %s", exc)
+            return
 
-    old_endpoint = obj.get("endpoint")
-    if old_endpoint == endpoint_url:
-        logger.debug("Tunnel endpoint unchanged, skipping update")
-        return
+        old_endpoint = obj.get("endpoint")
+        if old_endpoint == endpoint_url:
+            logger.debug("Tunnel endpoint unchanged, skipping update")
+            return
 
-    # --- Write updated endpoint ---
-    obj["endpoint"] = endpoint_url
-    PUBLIC_JSON_PATH.write_text(json.dumps(obj, indent=2))
+        obj["endpoint"] = endpoint_url
+        write_json(PUBLIC_JSON_PATH, obj)
     logger.info("Tunnel endpoint updated in public.json: %s", endpoint_url)
 
-    # --- Publish to IPFS + IPNS ---
-    from cipher_station.ipfs_client import publish_public_json_to_ipns
-    publish_public_json_to_ipns()
+    # --- Publish to IPFS + IPNS via the shared background worker, so a jammed
+    # DHT publish can never wedge this monitor thread ---
+    from cipher_station.ipns_publisher import request_publish
+    request_publish()
 
 
 def _poll_and_update():

@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 MAX_SKEW_SECONDS = 60
 NONCE_TTL_SECONDS = 60 * 60 * 24  # keep for 24h
+NONCE_CLEANUP_INTERVAL_SECONDS = 60 * 60  # prune expired nonces hourly
+
+_last_nonce_cleanup = 0.0
 
 
 def _canonical(method: str, path: str, uid: str, device_uid: str, ts: str, nonce: str, body_sha256: str) -> bytes:
@@ -68,14 +71,23 @@ async def require_delegate(
     except Exception:
         raise HTTPException(401, "bad timestamp")
 
-    now = int(time.time())
+    # Judge freshness against when the request STARTED arriving (stamped by the
+    # body-capture middleware before the body was drained), not the current
+    # time. The client signs its timestamp before it begins transmitting, so a
+    # large upload on a slow link can take minutes between signing and this
+    # check — that transfer time is not clock skew and must not fail auth.
+    received_at = getattr(request.state, "auth_received_at", None)
+    now = int(received_at if received_at is not None else time.time())
     if abs(now - ts_i) > MAX_SKEW_SECONDS:
         raise HTTPException(401, "stale request")
 
-    # optional cleanup occasionally
-    if (now % 100) == 0:
+    # periodic cleanup of expired nonces (previously gated on the wall clock
+    # landing on an exact multiple of 100s, which almost never triggered)
+    global _last_nonce_cleanup
+    if time.time() - _last_nonce_cleanup > NONCE_CLEANUP_INTERVAL_SECONDS:
+        _last_nonce_cleanup = time.time()
         try:
-            _cleanup_nonces(now)
+            _cleanup_nonces(int(time.time()))
         except Exception:
             pass
 
