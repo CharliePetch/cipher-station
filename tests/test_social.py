@@ -100,7 +100,9 @@ def fake_ipfs(monkeypatch):
     monkeypatch.setattr(manifest_mod, "ipfs_add_bytes", fake_add)
     monkeypatch.setattr(manifest_mod, "ipfs_unpin", fake_unpin)
     monkeypatch.setattr(manifest_mod, "ipfs_repo_gc", fake_gc)
-    monkeypatch.setattr(manifest_mod, "publish_public_json_to_ipns", fake_publish)
+    # manifest.py now queues IPNS publishing to the background worker; stub the
+    # queueing call so tests never spin up the publisher thread.
+    monkeypatch.setattr(manifest_mod, "request_publish", fake_publish)
     # privacy.py (profile + privacy now publish via manifest.set_client_profile,
     # so only manifest.py's publish binding needs patching — done above)
     monkeypatch.setattr(privacy_mod, "ipfs_get_bytes", fake_get)

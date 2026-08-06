@@ -398,21 +398,29 @@ def publish_public_json_to_ipns() -> str | None:
     """
     import json
     from cipher_station.config import PUBLIC_JSON_PATH
+    from cipher_station.storage import write_json, STATE_LOCK
 
     try:
-        if not PUBLIC_JSON_PATH.exists():
-            logger.warning("publish_public_json_to_ipns: public.json not found, skipping")
-            return None
-
-        obj = json.loads(PUBLIC_JSON_PATH.read_text())
-
         # Ensure IPFS identity fields are current: the base58 peer id, plus the
         # base36 IPNS name (k51…) that the client uses for endpoint recovery
         # (directly usable on public gateways — no base conversion needed).
+        # The (slow-ish) kubo queries run before taking the lock; the file
+        # read-modify-write itself is locked and atomic.
         try:
             node_info = ipfs_id()
             peer_id = node_info.get("ID")
-            ipns_name = ipfs_self_ipns_name()
+        except Exception as exc:
+            logger.debug("Could not fetch IPFS peer id: %s", exc)
+            peer_id = None
+        ipns_name = ipfs_self_ipns_name()
+
+        with STATE_LOCK:
+            if not PUBLIC_JSON_PATH.exists():
+                logger.warning("publish_public_json_to_ipns: public.json not found, skipping")
+                return None
+
+            obj = json.loads(PUBLIC_JSON_PATH.read_text())
+
             changed = False
             if peer_id and obj.get("ipfs_peer_id") != peer_id:
                 obj["ipfs_peer_id"] = peer_id
@@ -421,9 +429,7 @@ def publish_public_json_to_ipns() -> str | None:
                 obj["ipns_name"] = ipns_name
                 changed = True
             if changed:
-                PUBLIC_JSON_PATH.write_text(json.dumps(obj, indent=2))
-        except Exception as exc:
-            logger.debug("Could not refresh IPFS identity fields: %s", exc)
+                write_json(PUBLIC_JSON_PATH, obj)
 
         # Publish to IPFS
         public_json_bytes = json.dumps(obj, indent=2).encode("utf-8")
