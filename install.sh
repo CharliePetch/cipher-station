@@ -1146,6 +1146,95 @@ if [ -f /etc/systemd/system/cloudflared-tunnel.service ]; then
 fi
 
 # -----------------------------------------------------------
+# 13. Auto-updater
+#
+# Hosted fleet: the provisioner passes CIPHER_UPDATE_URL / CIPHER_UPDATE_TOKEN /
+# CIPHER_UPDATE_SERVER_ID once, at first install; they are persisted to
+# /etc/cipher-updater.env (root, 600 — the token authorizes writes to this
+# server's row on the control plane) together with the hosted knobs a re-run
+# needs (CIPHER_DATA_ROOT, CIPHER_STORAGE_MAX). From then on a timer checks in
+# every ~15 minutes, reports the running commit, and converges on the
+# operator-pinned SHA — see scripts/cipher-updater.sh for the health-gated
+# rollback story.
+#
+# Self-host: OPT-IN ONLY. Pass CIPHER_AUTO_UPDATE=true (optionally
+# CIPHER_AUTO_UPDATE_REF, default main) to follow the repo's branch tip.
+# Nothing is installed for self-hosters who didn't ask.
+#
+# Re-runs (including the ones the updater itself performs) refresh the
+# installed copy of the updater and its units but keep the existing env file
+# when no new knobs were passed — so an update never wipes its own config.
+# -----------------------------------------------------------
+UPDATER_ENV="/etc/cipher-updater.env"
+CIPHER_UPDATE_URL="${CIPHER_UPDATE_URL:-}"
+CIPHER_UPDATE_TOKEN="${CIPHER_UPDATE_TOKEN:-}"
+CIPHER_UPDATE_SERVER_ID="${CIPHER_UPDATE_SERVER_ID:-}"
+CIPHER_AUTO_UPDATE="${CIPHER_AUTO_UPDATE:-}"
+
+if [ -n "$CIPHER_UPDATE_URL" ] && [ -n "$CIPHER_UPDATE_TOKEN" ] && [ -n "$CIPHER_UPDATE_SERVER_ID" ]; then
+    sudo install -m 600 /dev/null "$UPDATER_ENV"
+    sudo tee "$UPDATER_ENV" > /dev/null <<UPDENV
+CIPHER_UPDATE_URL=${CIPHER_UPDATE_URL}
+CIPHER_UPDATE_TOKEN=${CIPHER_UPDATE_TOKEN}
+CIPHER_UPDATE_SERVER_ID=${CIPHER_UPDATE_SERVER_ID}
+CIPHER_DATA_ROOT=${CIPHER_DATA_ROOT}
+CIPHER_STORAGE_MAX=${CIPHER_STORAGE_MAX:-}
+CIPHER_CLONE_DIR=${CIPHER_DIR}
+CIPHER_PORT=${CIPHER_PORT}
+UPDENV
+    ok "Auto-updater configured (hosted mode)"
+elif [ "$CIPHER_AUTO_UPDATE" = "true" ] && ! sudo test -f "$UPDATER_ENV"; then
+    sudo install -m 600 /dev/null "$UPDATER_ENV"
+    sudo tee "$UPDATER_ENV" > /dev/null <<UPDENV
+CIPHER_AUTO_UPDATE_REF=${CIPHER_AUTO_UPDATE_REF:-main}
+CIPHER_CLONE_DIR=${CIPHER_DIR}
+CIPHER_PORT=${CIPHER_PORT}
+UPDENV
+    ok "Auto-updater configured (self-host opt-in, tracking origin/${CIPHER_AUTO_UPDATE_REF:-main})"
+fi
+
+if sudo test -f "$UPDATER_ENV" && [ -f "$CIPHER_DIR/scripts/cipher-updater.sh" ]; then
+    # Installed as a copy so the running updater is never rewritten by the
+    # checkout it performs.
+    sudo install -m 755 "$CIPHER_DIR/scripts/cipher-updater.sh" /usr/local/bin/cipher-updater
+
+    sudo tee /etc/systemd/system/cipherstation-updater.service > /dev/null <<UNIT
+[Unit]
+Description=Cipher Station auto-update check
+# Network, not the station itself: the updater must still run (and repair)
+# when cipherstation.service is down — that can be exactly the state a fix
+# needs to reach.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cipher-updater
+UNIT
+
+    sudo tee /etc/systemd/system/cipherstation-updater.timer > /dev/null <<UNIT
+[Unit]
+Description=Periodic Cipher Station update check
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+# Spreads a fleet's check-ins so a pin bump doesn't restart every station in
+# the same minute.
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable cipherstation-updater.timer 2>/dev/null || true
+    sudo systemctl start cipherstation-updater.timer 2>/dev/null || true
+    ok "Auto-updater timer enabled (checks every 15 minutes)"
+fi
+
+# -----------------------------------------------------------
 # Done
 # -----------------------------------------------------------
 echo ""
