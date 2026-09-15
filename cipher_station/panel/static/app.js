@@ -84,6 +84,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     $("tab-" + btn.dataset.tab).classList.remove("hidden");
     if (btn.dataset.tab === "drive") loadDrive();
     if (btn.dataset.tab === "config") loadConfig();
+    if (btn.dataset.tab === "federation") loadFederation();
   });
 });
 
@@ -495,4 +496,171 @@ $("fd-go").addEventListener("click", async () => {
   }
   setTimeout(() => { box.innerHTML = ""; box.classList.add("hidden"); }, 4000);
   loadDrive(true);
+});
+
+/* ---------------- federation ---------------- */
+let fedLoaded = false;
+
+function fmtTimestamp(ts) {
+  if (!ts) return "never";
+  return new Date(ts * 1000).toLocaleString();
+}
+
+async function loadFederation(force = false) {
+  if (fedLoaded && !force) return;
+  $("fed-loading").classList.remove("hidden");
+  $("fed-error").classList.add("hidden");
+  $("fed-body").classList.add("hidden");
+  try {
+    const s = await api("/admin/api/federation");
+    fedLoaded = true;
+    $("fed-loading").classList.add("hidden");
+    $("fed-body").classList.remove("hidden");
+    renderFederation(s.peers || []);
+  } catch (err) {
+    $("fed-loading").classList.add("hidden");
+    const el = $("fed-error");
+    el.textContent = "Could not load federation status: " + err.message;
+    el.classList.remove("hidden");
+  }
+}
+
+function renderFederation(peers) {
+  const empty = $("fed-empty");
+  const box = $("fed-peers");
+  box.innerHTML = "";
+  if (!peers.length) {
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  peers.forEach((p) => box.appendChild(federationPeerCard(p)));
+}
+
+function federationPeerCard(p) {
+  const card = document.createElement("div");
+  card.className = "card";
+
+  const label = document.createElement("div");
+  label.className = "label";
+  label.textContent = p.label || "(unlabeled peer)";
+  card.appendChild(label);
+
+  const idRow = document.createElement("div");
+  idRow.className = "kv";
+  const idKey = document.createElement("span");
+  idKey.textContent = "Peer ID";
+  const idVal = document.createElement("span");
+  idVal.className = "mono copyable";
+  idVal.title = "Click to copy";
+  idVal.textContent = p.peer_id;
+  idRow.append(idKey, idVal);
+  card.appendChild(idRow);
+
+  const usedRow = document.createElement("div");
+  usedRow.className = "kv";
+  const usedKey = document.createElement("span");
+  usedKey.textContent = "Pinned";
+  const usedVal = document.createElement("span");
+  usedVal.textContent =
+    `${fmtBytes(p.pinned_bytes)} of ${fmtBytes(p.quota_bytes)} (${p.pinned_count} objects)`;
+  usedRow.append(usedKey, usedVal);
+  card.appendChild(usedRow);
+
+  const meter = document.createElement("div");
+  meter.className = "meter";
+  const fill = document.createElement("div");
+  fill.className = "meter-fill";
+  const pct = p.quota_bytes ? Math.min(100, (p.pinned_bytes / p.quota_bytes) * 100) : 0;
+  fill.style.width = pct + "%";
+  meter.appendChild(fill);
+  card.appendChild(meter);
+
+  const syncedRow = document.createElement("div");
+  syncedRow.className = "kv";
+  const syncedKey = document.createElement("span");
+  syncedKey.textContent = "Last synced";
+  const syncedVal = document.createElement("span");
+  syncedVal.textContent = fmtTimestamp(p.last_synced_at);
+  syncedRow.append(syncedKey, syncedVal);
+  card.appendChild(syncedRow);
+
+  const actions = document.createElement("div");
+  actions.className = "row-end";
+  const syncBtn = document.createElement("button");
+  syncBtn.className = "btn";
+  syncBtn.textContent = "Sync now";
+  syncBtn.addEventListener("click", () => syncFederationPeer(p.peer_id, syncBtn));
+  const removeBtn = document.createElement("button");
+  removeBtn.className = "btn danger-btn";
+  removeBtn.textContent = "Remove";
+  removeBtn.addEventListener("click", () => removeFederationPeer(p.peer_id, p.label));
+  actions.append(syncBtn, removeBtn);
+  card.appendChild(actions);
+
+  return card;
+}
+
+async function syncFederationPeer(peerId, btn) {
+  const original = btn.textContent;
+  btn.textContent = "Syncing…";
+  btn.disabled = true;
+  try {
+    await api(`/admin/api/federation/sync/${encodeURIComponent(peerId)}`, { method: "POST" });
+    toast("Sync complete");
+    loadFederation(true);
+  } catch (err) {
+    toast("Sync failed: " + err.message, true);
+  } finally {
+    btn.textContent = original;
+    btn.disabled = false;
+  }
+}
+
+async function removeFederationPeer(peerId, label) {
+  if (!confirm(`Remove peer "${label || peerId}"? This unpins their content from IPFS.`)) return;
+  try {
+    await api(`/admin/api/federation/peers/${encodeURIComponent(peerId)}`, { method: "DELETE" });
+    toast("Peer removed");
+    loadFederation(true);
+  } catch (err) {
+    toast("Remove failed: " + err.message, true);
+  }
+}
+
+$("fed-add").addEventListener("click", async () => {
+  const peer_id = $("fed-peer-id").value.trim();
+  const label = $("fed-label").value.trim();
+  const quota_gb = parseFloat($("fed-quota").value) || 0;
+  if (!peer_id) { setMsg("fed-add-msg", "Peer ID is required.", true); return; }
+  try {
+    await api("/admin/api/federation/peers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ peer_id, label: label || null, quota_gb }),
+    });
+    $("fed-peer-id").value = "";
+    $("fed-label").value = "";
+    setMsg("fed-add-msg", "Peer added.");
+    loadFederation(true);
+  } catch (err) {
+    setMsg("fed-add-msg", err.message, true);
+  }
+});
+
+$("fed-sync-all").addEventListener("click", async () => {
+  const btn = $("fed-sync-all");
+  const original = btn.textContent;
+  btn.textContent = "Syncing all…";
+  btn.disabled = true;
+  try {
+    await api("/admin/api/federation/sync", { method: "POST" });
+    setMsg("fed-sync-all-msg", "Sync complete.");
+    loadFederation(true);
+  } catch (err) {
+    setMsg("fed-sync-all-msg", err.message, true);
+  } finally {
+    btn.textContent = original;
+    btn.disabled = false;
+  }
 });
