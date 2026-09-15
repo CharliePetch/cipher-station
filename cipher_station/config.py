@@ -113,6 +113,17 @@ CLOUDFLARE_METRICS_PORT = int(os.getenv("CLOUDFLARE_METRICS_PORT", "40469"))
 CIPHER_PUBLIC_URL = (os.getenv("CIPHER_PUBLIC_URL") or "").strip() or None
 
 # ---------------------------------------------------------------------------
+# Federation (peer pin replication) — consumer-side mirroring of other
+# stations' already-published (public) manifests. Never decrypts anything,
+# never needs a peer's secret key; see cipher_station/federation.py.
+# ---------------------------------------------------------------------------
+# Background sync interval, in seconds. 0 disables the background loop
+# entirely (manual "sync now" via the panel still works).
+CIPHER_FEDERATION_SYNC_INTERVAL_SECONDS = int(
+    os.getenv("CIPHER_FEDERATION_SYNC_INTERVAL_SECONDS", "3600")
+)
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
