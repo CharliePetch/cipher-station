@@ -257,3 +257,43 @@ def api_drive_delete(req: DriveDelete):
     except Exception as e:
         logger.error("Drive delete failed for %s: %s", req.post_cid, e)
         raise HTTPException(status_code=503, detail=f"delete failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Federation API (peer pin replication) — consumer-side mirroring of other
+# stations' already-published manifests. Never decrypts anything, never
+# needs a peer's secret key; see cipher_station/federation.py.
+# ---------------------------------------------------------------------------
+
+@panel_api.get("/federation")
+def api_federation_status():
+    return service.federation_status()
+
+
+class FederationPeerCreate(BaseModel):
+    peer_id: str
+    label: str | None = None
+    quota_gb: float = 0.0
+
+
+@panel_api.post("/federation/peers")
+def api_federation_add_peer(req: FederationPeerCreate):
+    try:
+        return service.federation_add_peer(req.peer_id, req.label, req.quota_gb)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@panel_api.delete("/federation/peers/{peer_id}")
+def api_federation_remove_peer(peer_id: str):
+    return service.federation_remove_peer(peer_id)
+
+
+@panel_api.post("/federation/sync")
+def api_federation_sync_all():
+    return service.federation_sync_all()
+
+
+@panel_api.post("/federation/sync/{peer_id}")
+def api_federation_sync_peer(peer_id: str):
+    return service.federation_sync_peer(peer_id)

@@ -244,3 +244,34 @@ def _rewrite_env(changes: dict[str, str | None]) -> None:
         except OSError:
             pass
         raise
+
+
+# ---------------------------------------------------------------------------
+# Federation (peer pin replication) — thin glue over cipher_station.federation.
+# The panel API layer (router.py) only ever calls through here, same as every
+# other feature area in this file.
+# ---------------------------------------------------------------------------
+
+def federation_status() -> dict:
+    from cipher_station import federation
+    return federation.get_status()
+
+
+def federation_add_peer(peer_id: str, label: str | None, quota_gb: float) -> dict:
+    from cipher_station import federation
+    return federation.add_peer(peer_id, label, quota_gb)
+
+
+def federation_remove_peer(peer_id: str) -> dict:
+    from cipher_station import federation
+    return federation.remove_peer(peer_id)
+
+
+def federation_sync_all() -> list[dict]:
+    from cipher_station import federation
+    return federation.sync_all()
+
+
+def federation_sync_peer(peer_id: str) -> dict:
+    from cipher_station import federation
+    return federation.sync_peer(peer_id)
