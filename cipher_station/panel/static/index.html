@@ -22,6 +22,7 @@
     <button class="tab active" data-tab="dashboard">Dashboard</button>
     <button class="tab" data-tab="config">Configuration</button>
     <button class="tab" data-tab="drive">Drive</button>
+    <button class="tab" data-tab="federation">Federation</button>
   </nav>
 </header>
 
@@ -137,6 +138,40 @@
   </div>
 
   <div id="dr-uploads" class="uploads hidden"></div>
+</section>
+
+<!-- ======================= FEDERATION ======================= -->
+<section id="tab-federation" class="tab-panel hidden">
+  <div id="fed-loading" class="state-block">Loading federation status…</div>
+  <div id="fed-error" class="state-block danger hidden"></div>
+  <div id="fed-body" class="hidden">
+    <div class="card">
+      <div class="label">Add peer</div>
+      <p class="hint">A peer's IPFS peer ID (<span class="mono">ipfs id</span> on their
+      station). Their already-published manifest is mirrored — post blobs and
+      envelope documents, as ciphertext — up to the quota below. Nothing is
+      ever decrypted and no key material is exchanged.</p>
+      <div class="field"><label for="fed-peer-id">Peer ID</label>
+        <input id="fed-peer-id" type="text" class="mono" placeholder="12D3KooW… or Qm…"></div>
+      <div class="field"><label for="fed-label">Label (optional)</label>
+        <input id="fed-label" type="text" maxlength="80" placeholder="e.g. Mom's station"></div>
+      <div class="field"><label for="fed-quota">Quota (GB)</label>
+        <input id="fed-quota" type="number" min="0" step="0.1" value="10"></div>
+      <button id="fed-add" class="btn primary">Add peer</button>
+      <span id="fed-add-msg" class="msg"></span>
+    </div>
+
+    <div class="row-end" style="justify-content: flex-start; margin: 0 0 16px;">
+      <button id="fed-sync-all" class="btn primary">Sync all peers now</button>
+      <span id="fed-sync-all-msg" class="msg"></span>
+    </div>
+
+    <div id="fed-empty" class="state-block hidden">
+      <p><strong>No federation peers configured yet.</strong></p>
+      <p class="hint">Add a peer above to start mirroring their published content.</p>
+    </div>
+    <div id="fed-peers"></div>
+  </div>
 </section>
 </main>
 

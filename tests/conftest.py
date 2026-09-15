@@ -64,6 +64,14 @@ def temp_cipher_station_dir(tmp_path, monkeypatch):
         if hasattr(mod, "BASE_DIR"):
             monkeypatch.setattr(mod, "BASE_DIR", base, raising=False)
 
+    # federation.py binds FEDERATION_PATH/FEDERATION_STATE_PATH at import
+    # time too (same reasoning as manifest.py/identity.py above) — without
+    # this a federation test would read/write the REAL station's
+    # federation.json / federation_state.json.
+    import cipher_station.federation as federation_mod
+    monkeypatch.setattr(federation_mod, "FEDERATION_PATH", base / "federation.json", raising=False)
+    monkeypatch.setattr(federation_mod, "FEDERATION_STATE_PATH", base / "federation_state.json", raising=False)
+
     # Reset DB connection between tests (close this thread's connection first)
     import cipher_station.database as db_mod
     db_mod.reset_connection()

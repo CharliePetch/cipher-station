@@ -35,6 +35,7 @@ from cipher_station.rewrap_envelopes import rewrap_all_posts
 from cipher_station.pairing import create_pairing_session, confirm_pairing_session, PairingThrottled
 from cipher_station.auth import require_delegate, require_owner
 from cipher_station.tunnel import start_tunnel_monitor
+from cipher_station.federation import start_federation_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,9 @@ def startup():
 
     # Start Cloudflare tunnel URL monitor (if enabled)
     start_tunnel_monitor()
+
+    # Start federation (peer pin replication) background sync (if enabled)
+    start_federation_monitor()
 
 
 # ---------------------------------------------------------
